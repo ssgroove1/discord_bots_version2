@@ -6,7 +6,7 @@ from discord import app_commands
 from datetime import datetime
 from pathlib import Path
 try:
-    from db_logic import DB_Manager
+    from shared.db_logic import DB_Manager
     manager = DB_Manager("economic.db")
     print("✅ БД подключена")
 except Exception as e:
