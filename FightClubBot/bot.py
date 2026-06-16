@@ -1009,7 +1009,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_RULER')
-    manager = DB_Manager('fg_db.db')
+    manager = DB_Manager('"/data/fg_db.db"')
     if TOKEN:
         bot.run(TOKEN)
     else:
