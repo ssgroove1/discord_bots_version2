@@ -3,6 +3,7 @@ import sqlite3, os
 class DB_Manager:
     def __init__(self, database):
         self.database = database
+        self.create_tables()
         try:
             conn = sqlite3.connect(database, timeout=5)
             conn.execute("PRAGMA journal_mode=WAL")
