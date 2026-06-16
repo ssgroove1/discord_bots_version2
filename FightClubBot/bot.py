@@ -5,15 +5,13 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime
 from pathlib import Path
-parent_dir = os.path.dirname(os.path.dirname(__file__))
-sys.path.append(parent_dir)
-from db_logic import DB_Manager
-
-# Получаем папку, где лежит текущий файл (bot.py)
-BASE_DIR = Path(__file__).parent.absolute()
-
-# Строим правильный путь к базе данных
-db_path = os.path.join(BASE_DIR, "fg_db.db") # Файл будет лежать рядом со скриптом
+try:
+    from db_logic import DB_Manager
+    manager = DB_Manager("economic.db")
+    print("✅ БД подключена")
+except Exception as e:
+    print(f"⚠️ БД не работает: {e}")
+    manager = None  # Бот работает без БД
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
@@ -474,17 +472,6 @@ class MuteModal(discord.ui.Modal, title="Выдача мута"):
 # ========== НЕКОТОРЫЕ РЕФЕРЕНС ==========
 
 trusted_bots = {1513553810369417216, 1512556017492295851, 1515369279724195891, 302050872383242240, 575776004233232386, 315926021457051650}
-ROLES_FILE = "user_roles.json"
-
-def load_roles():
-    if not os.path.exists(ROLES_FILE):
-        return {}
-    with open(ROLES_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-def save_roles(roles_data):
-    with open(ROLES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(roles_data, f, indent=4, ensure_ascii=False)
 
 def warn_text(num):
     return {1: "ⲡⲉⲣⲃыⲙ", 2: "ⲃⲧⲟⲣыⲙ", 3: "ⲧⲣⲉⲧьⲉⲙ"}.get(num, "очᴇᴩᴇдныʍ")
@@ -582,6 +569,14 @@ async def update_command_chats(interaction: discord.Interaction):
     await interaction.followup.send(f"✅ Обновление прав завершено. Обработано {count} каналов.", ephemeral=True)
 
 # ========== КОМАНДЫ МОДЕРАЦИИ ==========
+
+# В командах проверяйте
+@bot.command()
+async def test(ctx):
+    if manager is None:
+        await ctx.send("❌ БД недоступна")
+        return
+    # ... работа с БД
 
 @bot.tree.command(name="create_ticket", description="Создать панель тикета.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -1015,7 +1010,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_RULER')
-    manager = DB_Manager(db_path)
+    manager = DB_Manager("fg_db.db")
     if TOKEN:
         bot.run(TOKEN)
     else:

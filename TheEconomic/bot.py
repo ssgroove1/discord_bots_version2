@@ -3,9 +3,13 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 from pathlib import Path
-parent_dir = os.path.dirname(os.path.dirname(__file__))
-sys.path.append(parent_dir)
-from db_logic import DB_Manager
+try:
+    from db_logic import DB_Manager
+    manager = DB_Manager("economic.db")
+    print("✅ БД подключена")
+except Exception as e:
+    print(f"⚠️ БД не работает: {e}")
+    manager = None  # Бот работает без БД
 
 # Настройки бота
 intents = discord.Intents.default()
@@ -18,10 +22,6 @@ COMMANDS_CHANNEL, MOD_COMMANDS_CHANNEL = int(os.getenv('COMMANDS_CHANNEL_ID')), 
 GUILD_ID = int(os.getenv('GUILD_ID'))
 DEVELOPER_ID = int(os.getenv('DEVELOPER_ID'))
 MOD_LOGS_COMMANDS = int(os.getenv('MOD_LOGS_CHANNEL_ID2'))
-# Получаем папку, где лежит текущий файл (bot.py)
-BASE_DIR = Path(__file__).parent.absolute()
-# Строим правильный путь к базе данных
-db_path = os.path.join(BASE_DIR, "fg_db.db") # Файл будет лежать рядом со скриптом
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
@@ -274,7 +274,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_ECONOMIC')
-    manager = DB_Manager(db_path)
+    manager = DB_Manager("fg_db.db")
     if TOKEN:
         bot.run(TOKEN)
     else:
