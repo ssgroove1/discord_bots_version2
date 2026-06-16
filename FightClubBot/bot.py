@@ -5,13 +5,20 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime
 from pathlib import Path
-try:
-    from shared.db_logic import DB_Manager
-    manager = DB_Manager("economic.db")
-    print("✅ БД подключена")
-except Exception as e:
-    print(f"⚠️ БД не работает: {e}")
-    manager = None  # Бот работает без БД
+project_root = Path(__file__).parent.parent.absolute()
+# Добавляем корень проекта в пути поиска Python
+sys.path.insert(0, str(project_root))
+
+# Проверяем, что папка shared видна
+shared_path = project_root / 'shared'
+if shared_path.exists():
+    print(f"✅ Папка shared найдена: {shared_path}")
+else:
+    print(f"❌ ОШИБКА: Папка shared не найдена по пути {shared_path}!")
+# --- КОНЕЦ БЛОКА ---
+
+# Теперь импорт должен работать
+from shared.db_logic import DB_Manager
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
