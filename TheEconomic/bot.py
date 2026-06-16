@@ -3,20 +3,17 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 from pathlib import Path
-project_root = Path(__file__).parent.parent.absolute()
-# Добавляем корень проекта в пути поиска Python
-sys.path.insert(0, str(project_root))
+# Путь к БД в корне проекта
+db_path = Path(__file__).parent.parent / "fg_db.db"
 
-# Проверяем, что папка shared видна
-shared_path = project_root / 'shared'
-if shared_path.exists():
-    print(f"✅ Папка shared найдена: {shared_path}")
-else:
-    print(f"❌ ОШИБКА: Папка shared не найдена по пути {shared_path}!")
-# --- КОНЕЦ БЛОКА ---
-
-# Теперь импорт должен работать
-from shared.db_logic import DB_Manager
+# Создаём менеджер
+try:
+    from shared.db_logic import DB_Manager
+    manager = DB_Manager(str(db_path))
+    print("✅ Менеджер БД создан")
+except Exception as e:
+    print(f"❌ Ошибка создания менеджера: {e}")
+    manager = None
 
 # Настройки бота
 intents = discord.Intents.default()
@@ -281,7 +278,6 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_ECONOMIC')
-    manager = DB_Manager("fg_db.db")
     if TOKEN:
         bot.run(TOKEN)
     else:
