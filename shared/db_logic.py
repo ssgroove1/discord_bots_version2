@@ -3,6 +3,13 @@ import sqlite3, os
 class DB_Manager:
     def __init__(self, database):
         self.database = database
+        try:
+            conn = sqlite3.connect(database, timeout=5)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.close()
+            print(f"✅ БД доступна: {database}")
+        except Exception as e:
+            print(f"⚠️ БД НЕ ДОСТУПНА: {e}")
 
     async def create_tables(self):
         conn = sqlite3.connect(self.database, timeout=10)
@@ -104,22 +111,34 @@ class DB_Manager:
 
     # The Economic
     async def get_user_economic(self, user_id):
-        conn = sqlite3.connect(self.database, timeout=10)
-        cursor = conn.cursor()
-        cursor.execute("SELECT points, trees, bugs, last_claim, last_water FROM user_balance WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        if row is None:
-            cursor.execute("INSERT INTO user_balance (user_id) VALUES (?)", (user_id,))
-            conn.commit()
-            row = (0, 0, 0, 0.0, 0.0)
-        conn.close()
-        return {
-            "points": row[0], 
-            "trees": row[1], 
-            "bugs": row[2],
-            "last_claim": row[3],
-            "last_water": row[4]
-        }
+        conn = None
+        try:
+            conn = sqlite3.connect(self.database, timeout=5)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute("SELECT points, trees, bugs, last_claim, last_water FROM user_balance WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute("INSERT INTO user_balance (user_id) VALUES (?)", (user_id,))
+                conn.commit()
+                row = (0, 0, 0, 0.0, 0.0)
+            conn.close()
+            return {
+                "points": row[0], 
+                "trees": row[1], 
+                "bugs": row[2],
+                "last_claim": row[3],
+                "last_water": row[4]
+            }
+        except sqlite3.OperationalError as e:
+            print(f"⚠️ Ошибка БД в get_user_economic: {e}")
+            return None
+        except Exception as e:
+            print(f"❌ Другая ошибка: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
     
     async def update_user_economic(self, user_id, points, trees, bugs, last_claim, last_water):
         conn = sqlite3.connect(self.database, timeout=10)
@@ -134,4 +153,3 @@ class DB_Manager:
 
 if __name__ == '__main__':
     manager = DB_Manager('fg_db.db')
-    manager.create_tables()

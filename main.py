@@ -1,12 +1,15 @@
-import subprocess, os, sys
+import subprocess
+import os
+import sys
+import time
+import threading
 from pathlib import Path
-from dotenv import load_dotenv
 
-# 1. Определяем корневую папку проекта (там, где лежит main.py)
+# 1. Определяем корневую папку проекта
 BASE_DIR = Path(__file__).parent.absolute()
 print(f"📁 Корень проекта: {BASE_DIR}")
 
-# 2. Загружаем переменные из shared.env в окружение
+# 2. Загружаем переменные из shared.env
 env_file = BASE_DIR / 'shared.env'
 if env_file.exists():
     print(f"✅ Найден файл .env: {env_file}")
@@ -19,13 +22,13 @@ if env_file.exists():
 else:
     print(f"❌ Файл .env НЕ НАЙДЕН: {env_file}")
 
-# 3. Проверяем, что токены загружены
+# 3. Проверяем токены
 print("\n🔍 Проверка токенов:")
 for name in ['BOT_TOKEN_RULER', 'BOT_TOKEN_FUNBOT', 'BOT_TOKEN_ECONOMIC']:
     token = os.getenv(name)
     print(f"  {'✅' if token else '❌'} {name}: {'найден' if token else 'НЕ НАЙДЕН!'}")
 
-# 4. Список ботов (папки находятся в корне проекта)
+# 4. Список ботов
 bots = [
     {"path": BASE_DIR / "FightClubBot", "name": "FightClubBot"},
     {"path": BASE_DIR / "FunBot", "name": "FunBot"},
@@ -35,7 +38,18 @@ bots = [
 python_executable = sys.executable
 print(f"\n🐍 Использую Python: {python_executable}")
 
+# Функция для чтения вывода процесса
+def read_output(process, name):
+    try:
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                print(f"[{name}] {line.strip()}")
+    except Exception as e:
+        print(f"[{name}] Ошибка чтения: {e}")
+
 processes = []
+threads = []
+
 for bot in bots:
     bot_file = bot["path"] / "bot.py"
     if not bot_file.exists():
@@ -44,39 +58,37 @@ for bot in bots:
 
     print(f"🚀 Запускаю: {bot['name']} из {bot['path']}")
 
-    # Ключевой момент: передаем переменные окружения дочернему процессу
     env = os.environ.copy()
     process = subprocess.Popen(
         [python_executable, str(bot_file)],
-        cwd=str(bot["path"]), # Рабочая папка процесса - папка бота
+        cwd=str(bot["path"]),
         env=env,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # ← объединяем stderr в stdout
         text=True,
         bufsize=1
     )
     processes.append(process)
-    print(f"✅ Запущен (PID: {process.pid})")
+    
+    # Запускаем поток для чтения вывода
+    thread = threading.Thread(target=read_output, args=(process, bot['name']), daemon=True)
+    thread.start()
+    threads.append(thread)
+    
+    print(f"✅ {bot['name']} запущен (PID: {process.pid})")
 
 print(f"\n🎯 Запущено ботов: {len(processes)}")
-print("📝 Логи будут выводиться ниже...\n")
+print("📝 Логи будут выводиться ниже...")
+print("🛑 Нажмите Ctrl+C для остановки\n")
 
-# 5. Простой цикл чтения логов
-import time
+# Ждём завершения
 try:
     while True:
+        # Проверяем, не завершились ли процессы
         for i, p in enumerate(processes):
-            try:
-                stdout, stderr = p.communicate(timeout=0.1)
-                if stdout:
-                    print(f"[Bot{i+1}] {stdout.strip()}")
-                if stderr:
-                    print(f"[Bot{i+1} ERROR] {stderr.strip()}")
-            except subprocess.TimeoutExpired:
-                pass
             if p.poll() is not None:
                 print(f"⚠️ Bot{i+1} завершился с кодом {p.returncode}")
-        time.sleep(0.5)
+        time.sleep(1)
 except KeyboardInterrupt:
     print("\n🛑 Останавливаем ботов...")
     for p in processes:
