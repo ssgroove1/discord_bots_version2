@@ -3,10 +3,9 @@ import sqlite3, os
 class DB_Manager:
     def __init__(self, database):
         self.database = database
-        self.conn = sqlite3.connect(database, timeout=10)
 
     async def create_tables(self):
-        conn = sqlite3.connect(self.database)
+        conn = sqlite3.connect(self.database, timeout=10)
         with conn:
             # The Ruler
             conn.execute('''CREATE TABLE IF NOT EXISTS user_info (
@@ -43,7 +42,7 @@ class DB_Manager:
             conn.commit()
     # The Ruler
     async def get_user_ruler(self, user_id):
-        conn = sqlite3.connect(self.database)
+        conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
         cursor.execute("SELECT warnings, reputation FROM user_info WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
@@ -58,7 +57,7 @@ class DB_Manager:
         }
     
     async def update_user_ruler(self, user_id, warnings, reputation):
-        conn = sqlite3.connect(self.database)
+        conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE user_info
@@ -69,7 +68,7 @@ class DB_Manager:
         conn.close()
 
     async def get_user_roles_ruler(self, user_id):
-        conn = sqlite3.connect(self.database)
+        conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
         cursor.execute("SELECT role_id FROM user_roles WHERE user_id = ?", (user_id,))
         rows = cursor.fetchall()
@@ -79,7 +78,7 @@ class DB_Manager:
         return [row[0] for row in rows]
     
     async def update_user_roles_ruler(self, user_id, role_ids):
-        conn = sqlite3.connect(self.database)
+        conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT 1 FROM user_info WHERE user_id = ?", (user_id,))
@@ -105,7 +104,7 @@ class DB_Manager:
 
     # The Economic
     async def get_user_economic(self, user_id):
-        conn = sqlite3.connect(self.database)
+        conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
         cursor.execute("SELECT points, trees, bugs, last_claim, last_water FROM user_balance WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
@@ -123,7 +122,7 @@ class DB_Manager:
         }
     
     async def update_user_economic(self, user_id, points, trees, bugs, last_claim, last_water):
-        conn = sqlite3.connect(self.database)
+        conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE user_balance 
