@@ -135,3 +135,4 @@ class DB_Manager:
 
 if __name__ == '__main__':
     manager = DB_Manager('fg_db.db')
+    manager.create_tables()
