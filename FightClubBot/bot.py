@@ -479,7 +479,7 @@ async def warn_user(interaction: discord.Interaction, member: discord.Member = N
         2: member.guild.get_role(SECOND_WARN_ROLE),
         3: member.guild.get_role(THIRD_WARN_ROLE)
     }
-    user_id = interaction.user.id
+    user_id = member.id
     user_data = await manager.get_user_ruler(user_id)
     current_warns = user_data["warnings"]
     next_warn = current_warns + 1
