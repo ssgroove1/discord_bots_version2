@@ -1,7 +1,13 @@
-import subprocess
-import os
-import sys
+import subprocess, os, sys
+from pathlib import Path
+from dotenv import load_dotenv
 
+env_file = Path(__file__).parent.parent / 'shared.env'
+if env_file.exists():
+    load_dotenv(env_file)
+    print(f"✅ Загружен .env: {env_file}")
+else:
+    print(f"⚠️ Файл .env не найден: {env_file}")
 # Текущая директория: /home/container
 base_dir = os.getcwd()  # /home/container
 

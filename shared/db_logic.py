@@ -3,6 +3,7 @@ import sqlite3, os
 class DB_Manager:
     def __init__(self, database):
         self.database = database
+        self.conn = sqlite3.connect(database, timeout=10)
 
     def create_tables(self):
         conn = sqlite3.connect(self.database)

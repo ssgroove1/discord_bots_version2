@@ -570,14 +570,6 @@ async def update_command_chats(interaction: discord.Interaction):
 
 # ========== КОМАНДЫ МОДЕРАЦИИ ==========
 
-# В командах проверяйте
-@bot.command()
-async def test(ctx):
-    if manager is None:
-        await ctx.send("❌ БД недоступна")
-        return
-    # ... работа с БД
-
 @bot.tree.command(name="create_ticket", description="Создать панель тикета.")
 @app_commands.checks.has_permissions(administrator=True)
 async def create_ticket(interaction: discord.Interaction):
