@@ -4,8 +4,10 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
+from pathlib import Path
 
-load_dotenv()
+env_path = Path(__file__).parent.parent / "shared.env"
+load_dotenv(env_path)
 PREFIX = os.getenv('COMMAND_PREFIX')
 COUNT_ROLE = int(os.getenv('COUNT_BAD_ROLE'))
 COMMANDS_CHANNEL = int(os.getenv('COMMANDS_CHANNEL_ID'))
@@ -132,21 +134,21 @@ class get_flower(discord.ui.View):
 
 next_number_in_count_channel = 1
 
-with open('FunBot\hug_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs\hug_gifs.txt', 'r', encoding='utf-8') as f:
     hug_gifs = f.readlines()
-with open('FunBot\kiss_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs\kiss_gifs.txt', 'r', encoding='utf-8') as f:
     kiss_gifs = f.readlines()
-with open('FunBot\hello_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs\hello_gifs.txt', 'r', encoding='utf-8') as f:
     hello_gifs = f.readlines()
-with open('FunBot\\flower_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs\\flower_gifs.txt', 'r', encoding='utf-8') as f:
     flower_gifs = f.readlines()
-with open('FunBot\\pat_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs\pat_gifs.txt', 'r', encoding='utf-8') as f:
     pat_gifs = f.readlines()
-with open('FunBot\slap_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs\slap_gifs.txt', 'r', encoding='utf-8') as f:
     slap_gifs = f.readlines()
-with open('FunBot\\bite_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs\\bite_gifs.txt', 'r', encoding='utf-8') as f:
     bite_gifs = f.readlines()
-with open('FunBot\cry_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs\cry_gifs.txt', 'r', encoding='utf-8') as f:
     cry_gifs = f.readlines()
 
 async def remove_role_at_time(member: discord.Member, role: discord.Role, minutes: int):
@@ -323,6 +325,21 @@ async def eight_ball(interaction: discord.Interaction, question: str = None):
         color=discord.Color.darker_grey()
     )
     await interaction.response.send_message(embed=embed, ephemeral=False)
+
+# @bot.tree.command(name="herb", description="Смешать травы (Resident Evil)")
+# @app_commands.describe(color="Выберите цвет, примеры: зеленая, зеленая+красная")
+# async def herb(interaction: discord.Interaction, color: str):
+#     herbs = {
+#         "зеленая": "Вы восстанавливаете 30 HP 🌿",
+#         "красная": "Вы наносите 20 урона + временный бафф 🩸",
+#         "синяя": "Снимает отравление (и глупые эффекты) 💙",
+#         "зеленая+красная": "60 HP + бафф 💚❤️",
+#         "зеленая+синяя": "40 HP + антидот 💚💙"
+#     }
+    
+#     color_lower = color.lower().strip()
+#     result = herbs.get(color_lower, "🧪 Трава не сочетается... Попробуй еще раз.")
+#     await interaction.response.send_message(f"🍃 {result}")
 
 @bot.tree.command(name="giveaway", description="Запустить новый розыгрыш")
 @app_commands.describe(
@@ -566,7 +583,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     # Загружаем токен из .env файла 
-    TOKEN = os.getenv('BOT_TOKEN')
+    TOKEN = os.getenv('BOT_TOKEN_FUNBOT')
     if TOKEN:
         bot.run(TOKEN)
     else:

@@ -4,11 +4,13 @@ from collections import defaultdict
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime
+from pathlib import Path
 parent_dir = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(parent_dir)
 from db_logic import DB_Manager
 
-load_dotenv()
+env_path = Path(__file__).parent.parent / "shared.env"
+load_dotenv(env_path)
 PREFIX = os.getenv('COMMAND_PREFIX')
 COMMANDS_CHANNEL, MOD_COMMANDS_CHANNEL = int(os.getenv('COMMANDS_CHANNEL_ID')), int(os.getenv('MOD_COMMANDS_CHANNEL_ID'))
 WELCOME_CHANNEL, COUNT_CHANNEL, MOD_LOGS, MOD_LOGS_COMMANDS = int(os.getenv('WELCOME_CHANNEL_ID')), int(os.getenv('COUNT_CHANNEL_ID')), int(os.getenv('MOD_LOGS_CHANNEL_ID')), int(os.getenv('MOD_LOGS_CHANNEL_ID2'))
@@ -1006,7 +1008,7 @@ async def on_ready():
 
 # Запуск бота
 if __name__ == "__main__":
-    TOKEN = os.getenv('BOT_TOKEN')
+    TOKEN = os.getenv('BOT_TOKEN_RULER')
     manager = DB_Manager('fg_db.db')
     if TOKEN:
         bot.run(TOKEN)

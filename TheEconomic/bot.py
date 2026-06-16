@@ -2,6 +2,7 @@ import discord, random, sqlite3, os, time, sys
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
+from pathlib import Path
 parent_dir = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(parent_dir)
 from db_logic import DB_Manager
@@ -10,13 +11,13 @@ from db_logic import DB_Manager
 intents = discord.Intents.default()
 intents.message_content = True
 
-load_dotenv()
-
+env_path = Path(__file__).parent.parent / "shared.env"
+load_dotenv(env_path)
 PREFIX = os.getenv('COMMAND_PREFIX')
 COMMANDS_CHANNEL, MOD_COMMANDS_CHANNEL = int(os.getenv('COMMANDS_CHANNEL_ID')), int(os.getenv('MOD_COMMANDS_CHANNEL_ID'))
 GUILD_ID = int(os.getenv('GUILD_ID'))
 DEVELOPER_ID = int(os.getenv('DEVELOPER_ID'))
-MOD_LOGS_COMMANDS = int(os.getenv('MOD_LOGS_CHANNEL_ID'))
+MOD_LOGS_COMMANDS = int(os.getenv('MOD_LOGS_CHANNEL_ID2'))
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
@@ -29,7 +30,7 @@ roles_shop = {
     "📈 | 𝙏𝙧𝙚𝙣𝙙𝙘𝙖𝙨𝙩𝙚𝙧": {'role_id': 1515397844318687233, 'cost': 50}, 
     "🔗 | 𝘾𝙧𝙤𝙨𝙨𝙡𝙞𝙣𝙠𝙚𝙧": {'role_id': 1515396953440129229, 'cost': 100}, 
     "👁️‍🗨️ | 𝙊𝙗𝙨𝙚𝙧𝙫𝙚𝙧": {'role_id': 1515396410231750700, 'cost': 250}, 
-    "🎩| 𝘼𝙧𝙞𝙨𝙩𝙤𝙘𝙧𝙖𝙩": {'role_id': 1515398117426462730, 'cost': 500}, 
+    "🎩 | 𝘼𝙧𝙞𝙨𝙩𝙤𝙘𝙧𝙖𝙩": {'role_id': 1515398117426462730, 'cost': 500}, 
 }
 
 def is_admin_or_has_role():
@@ -268,7 +269,7 @@ async def on_ready():
 
 # Запуск бота
 if __name__ == "__main__":
-    TOKEN = os.getenv('BOT_TOKEN')
+    TOKEN = os.getenv('BOT_TOKEN_ECONOMIC')
     manager = DB_Manager('fg_db.db')
     if TOKEN:
         bot.run(TOKEN)

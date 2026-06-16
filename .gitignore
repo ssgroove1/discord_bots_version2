@@ -1,5 +1,2 @@
-.env
-FunBot\.env
-FightClubBot\.env
-TheEconomic\.env
+shared.env
 tokens.txt
