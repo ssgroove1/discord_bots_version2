@@ -134,21 +134,21 @@ class get_flower(discord.ui.View):
 
 next_number_in_count_channel = 1
 
-with open('gifs\hug_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs/hug_gifs.txt', 'r', encoding='utf-8') as f:
     hug_gifs = f.readlines()
-with open('gifs\kiss_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs/kiss_gifs.txt', 'r', encoding='utf-8') as f:
     kiss_gifs = f.readlines()
-with open('gifs\hello_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs/hello_gifs.txt', 'r', encoding='utf-8') as f:
     hello_gifs = f.readlines()
-with open('gifs\\flower_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs/flower_gifs.txt', 'r', encoding='utf-8') as f:
     flower_gifs = f.readlines()
-with open('gifs\pat_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs/pat_gifs.txt', 'r', encoding='utf-8') as f:
     pat_gifs = f.readlines()
-with open('gifs\slap_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs/slap_gifs.txt', 'r', encoding='utf-8') as f:
     slap_gifs = f.readlines()
-with open('gifs\\bite_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs/bite_gifs.txt', 'r', encoding='utf-8') as f:
     bite_gifs = f.readlines()
-with open('gifs\cry_gifs.txt', 'r', encoding='utf-8') as f:
+with open('gifs/cry_gifs.txt', 'r', encoding='utf-8') as f:
     cry_gifs = f.readlines()
 
 async def remove_role_at_time(member: discord.Member, role: discord.Role, minutes: int):
