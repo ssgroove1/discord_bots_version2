@@ -4,13 +4,6 @@ class DB_Manager:
     def __init__(self, database):
         self.database = database
         self.create_tables()
-        try:
-            conn = sqlite3.connect(database, timeout=5)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.close()
-            print(f"✅ БД доступна: {database}")
-        except Exception as e:
-            print(f"⚠️ БД НЕ ДОСТУПНА: {e}")
 
     def create_tables(self):
         conn = sqlite3.connect(self.database, timeout=10)
