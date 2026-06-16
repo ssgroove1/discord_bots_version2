@@ -5,7 +5,7 @@ class DB_Manager:
         self.database = database
         self.conn = sqlite3.connect(database, timeout=10)
 
-    def create_tables(self):
+    async def create_tables(self):
         conn = sqlite3.connect(self.database)
         with conn:
             # The Ruler
@@ -42,7 +42,7 @@ class DB_Manager:
                         )''')
             conn.commit()
     # The Ruler
-    def get_user_ruler(self, user_id):
+    async def get_user_ruler(self, user_id):
         conn = sqlite3.connect(self.database)
         cursor = conn.cursor()
         cursor.execute("SELECT warnings, reputation FROM user_info WHERE user_id = ?", (user_id,))
@@ -57,7 +57,7 @@ class DB_Manager:
             "reputation": row[1], 
         }
     
-    def update_user_ruler(self, user_id, warnings, reputation):
+    async def update_user_ruler(self, user_id, warnings, reputation):
         conn = sqlite3.connect(self.database)
         cursor = conn.cursor()
         cursor.execute("""
@@ -68,7 +68,7 @@ class DB_Manager:
         conn.commit()
         conn.close()
 
-    def get_user_roles_ruler(self, user_id):
+    async def get_user_roles_ruler(self, user_id):
         conn = sqlite3.connect(self.database)
         cursor = conn.cursor()
         cursor.execute("SELECT role_id FROM user_roles WHERE user_id = ?", (user_id,))
@@ -78,7 +78,7 @@ class DB_Manager:
             return []
         return [row[0] for row in rows]
     
-    def update_user_roles_ruler(self, user_id, role_ids):
+    async def update_user_roles_ruler(self, user_id, role_ids):
         conn = sqlite3.connect(self.database)
         cursor = conn.cursor()
         try:
@@ -104,7 +104,7 @@ class DB_Manager:
 
 
     # The Economic
-    def get_user_economic(self, user_id):
+    async def get_user_economic(self, user_id):
         conn = sqlite3.connect(self.database)
         cursor = conn.cursor()
         cursor.execute("SELECT points, trees, bugs, last_claim, last_water FROM user_balance WHERE user_id = ?", (user_id,))
@@ -122,7 +122,7 @@ class DB_Manager:
             "last_water": row[4]
         }
     
-    def update_user_economic(self, user_id, points, trees, bugs, last_claim, last_water):
+    async def update_user_economic(self, user_id, points, trees, bugs, last_claim, last_water):
         conn = sqlite3.connect(self.database)
         cursor = conn.cursor()
         cursor.execute("""

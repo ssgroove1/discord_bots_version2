@@ -3,17 +3,8 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 from pathlib import Path
-# Путь к БД в корне проекта
-db_path = Path(__file__).parent.parent / "fg_db.db"
-
-# Создаём менеджер
-try:
-    from shared.db_logic import DB_Manager
-    manager = DB_Manager(str(db_path))
-    print("✅ Менеджер БД создан")
-except Exception as e:
-    print(f"❌ Ошибка создания менеджера: {e}")
-    manager = None
+sys.path.append(str(Path(__file__).parent.parent))
+from shared.db_logic import DB_Manager
 
 # Настройки бота
 intents = discord.Intents.default()
@@ -72,7 +63,7 @@ async def claim(interaction: discord.Interaction):
         return
     await interaction.response.defer()
     user_id = interaction.user.id
-    user_data = manager.get_user_economic(user_id)
+    user_data = await manager.get_user_economic(user_id)
     current_time = time.time()
     cooldown_period = 43200
     time_passed = current_time - user_data["last_claim"]
@@ -87,7 +78,7 @@ async def claim(interaction: discord.Interaction):
     reward = random.randint(5, 10) if random.randint(1, 100) <= chance_max else random.randint(1, 5)
     new_points = user_data["points"] + reward
 
-    manager.update_user_economic(user_id, new_points, user_data["trees"], user_data["bugs"], current_time, user_data["last_water"])
+    await manager.update_user_economic(user_id, new_points, user_data["trees"], user_data["bugs"], current_time, user_data["last_water"])
     await interaction.followup.send(f"{interaction.user.mention}, ʙы ᴨоᴧучиᴧи **{reward} <:physpoints:1515371982571704361>**!\nʙᴀɯ ᴛᴇᴋущий бᴀᴧᴀнᴄ: **{new_points} <:physpoints:1515371982571704361>**.")
 
 @bot.tree.command(name="balance", description="Посмотреть баланс.")
@@ -97,7 +88,7 @@ async def balance(interaction: discord.Interaction, member: discord.Member = Non
         return
     if member is None:
         member = interaction.user
-    user_data = manager.get_user_economic(member.id)
+    user_data = await manager.get_user_economic(member.id)
     embed = discord.Embed(title=f"{member.name}'𝙨 𝙥𝙧𝙤𝙛𝙞𝙡𝙚 <:killau1:1515061286969413683>", color=discord.Color.darker_grey())
     garden_status = f"ᴨᴩиобᴩᴇᴛᴇнныᴇ дᴇᴩᴇʙья: **{user_data['trees']}/{MAX_TREES}** <:scarytree:1515372061839589417>"
 
@@ -135,7 +126,7 @@ async def buy_role(interaction: discord.Interaction, role_name: str):
         return
 
     role_info = roles_shop[role_name]
-    user_data = manager.get_user_economic(user_id)
+    user_data = await manager.get_user_economic(user_id)
 
     if user_data["points"] < role_info['cost']:
         await interaction.response.send_message(f"❌ Недостаточно очков. Нужно: {role_info['cost']} <:physpoints:1515371982571704361>.", ephemeral=True)
@@ -149,7 +140,7 @@ async def buy_role(interaction: discord.Interaction, role_name: str):
     try:
         await interaction.user.add_roles(role)
         new_points = user_data["points"] - role_info['cost']
-        manager.update_user_economic(user_id, new_points, user_data["trees"], user_data["bugs"], user_data["last_claim"], user_data["last_water"])
+        await manager.update_user_economic(user_id, new_points, user_data["trees"], user_data["bugs"], user_data["last_claim"], user_data["last_water"])
         await interaction.response.send_message(f"{interaction.user.mention}, ʙы уᴄᴨᴇɯно ᴋуᴨиᴧи ᴩоᴧь **{role_name}**!\nоᴄᴛᴀᴛоᴋ: {new_points} <:physpoints:1515371982571704361>.")
     except discord.Forbidden:
         await interaction.response.send_message("❌ У бота нет прав. Переместите роль бота выше.", ephemeral=True)
@@ -164,7 +155,7 @@ async def buy_tree(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Эта команда работает только в канале <#{COMMANDS_CHANNEL}>!", ephemeral=True)
         return
     user_id = interaction.user.id
-    user_data = manager.get_user_economic(user_id)
+    user_data = await manager.get_user_economic(user_id)
 
     if user_data["trees"] >= MAX_TREES:
         await interaction.response.send_message(f"❌ Достигнут лимит {MAX_TREES} <:scarytree:1515372061839589417>.", ephemeral=True)
@@ -176,7 +167,7 @@ async def buy_tree(interaction: discord.Interaction):
 
     new_points = user_data["points"] - TREE_COST
     new_trees = user_data["trees"] + 1
-    manager.update_user_economic(user_id, new_points, new_trees, user_data["bugs"], user_data["last_claim"], user_data["last_water"])
+    await manager.update_user_economic(user_id, new_points, new_trees, user_data["bugs"], user_data["last_claim"], user_data["last_water"])
     await interaction.response.send_message(f"<:scarytree:1515372061839589417> ᴋуᴨᴧᴇно дᴇᴩᴇʙо зᴀ {TREE_COST} <:physpoints:1515371982571704361>! ʙᴄᴇᴦо ʙ ᴄᴀду: **{new_trees}/{MAX_TREES}**.")
 
 @bot.tree.command(name="water", description="Полить сад (Собрать прибыль).")
@@ -186,7 +177,7 @@ async def water(interaction: discord.Interaction):
         return
     await interaction.response.defer()
     user_id = interaction.user.id
-    user_data = manager.get_user_economic(user_id)
+    user_data = await manager.get_user_economic(user_id)
     my_trees = user_data["trees"]
     active_bugs = user_data["bugs"]
 
@@ -221,7 +212,7 @@ async def water(interaction: discord.Interaction):
         bug_event_text = "\n**о нᴇᴛ! нᴀ ʙᴀɯ ᴄᴀд нᴀᴨᴀᴧи жуᴋи!** ɯᴛᴩᴀɸ нᴀ 3 ᴨоᴧиʙᴀ."
 
     new_points = user_data["points"] + base_reward
-    manager.update_user_economic(user_id, new_points, my_trees, active_bugs, user_data["last_claim"], current_time)
+    await manager.update_user_economic(user_id, new_points, my_trees, active_bugs, user_data["last_claim"], current_time)
     await interaction.followup.send(f"{interaction.user.mention}, ʙы ᴨоᴧиᴧи ᴄᴀд из **{my_trees}** <:scarytree:1515372061839589417>!\n{penalty_text}ᴨᴩибыᴧь: **+{base_reward}** <:physpoints:1515371982571704361>. бᴀᴧᴀнᴄ: {new_points} <:physpoints:1515371982571704361>.{bug_event_text}")
 
 @bot.tree.command(name="give", description="Выдать награду пользователю.")
@@ -229,9 +220,9 @@ async def water(interaction: discord.Interaction):
 @is_admin_or_has_role()
 async def give(interaction: discord.Interaction, user: discord.User, points: int):
     channel = bot.get_channel(MOD_LOGS_COMMANDS)
-    user_data = manager.get_user_economic(user.id)
+    user_data = await manager.get_user_economic(user.id)
     new_points = user_data["points"] + points
-    manager.update_user_economic(user.id, new_points, user_data["trees"], user_data["bugs"], 
+    await manager.update_user_economic(user.id, new_points, user_data["trees"], user_data["bugs"], 
     user_data["last_claim"], user_data["last_water"])
     await interaction.response.send_message(f"Пользователю {user.mention} добавлено {points} <:physpoints:1515357132474679317>. Баланс: {new_points} <:physpoints:1515357132474679317>.")
     await channel.send(f"Пользователь {interaction.user.mention} использовал команду **/give** на игроке {user.mention} и дал {points} <:physpoints:1515357132474679317>")
@@ -241,9 +232,9 @@ async def give(interaction: discord.Interaction, user: discord.User, points: int
 @is_admin_or_has_role()
 async def take(interaction: discord.Interaction, user: discord.User, points: int):
     channel = bot.get_channel(MOD_LOGS_COMMANDS)
-    user_data = manager.get_user_economic(user.id)
+    user_data = await manager.get_user_economic(user.id)
     new_points = max(0, user_data["points"] - points)
-    manager.update_user_economic(user.id, new_points, user_data["trees"], user_data["bugs"], 
+    await manager.update_user_economic(user.id, new_points, user_data["trees"], user_data["bugs"], 
     user_data["last_claim"], user_data["last_water"])
     await interaction.response.send_message(f"У пользователя {user.mention} забрано {points} <:physpoints:1515357132474679317>. Теперь: {new_points} <:physpoints:1515357132474679317>.")
     await channel.send(f"Пользователь {interaction.user.mention} использовал команду **/take** на игроке {user.mention} и забрал {points} <:physpoints:1515357132474679317>")
@@ -278,6 +269,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_ECONOMIC')
+    manager = DB_Manager('fg_db.db')
     if TOKEN:
         bot.run(TOKEN)
     else:

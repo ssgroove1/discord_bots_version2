@@ -5,17 +5,8 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime
 from pathlib import Path
-# Путь к БД в корне проекта
-db_path = Path(__file__).parent.parent / "fg_db.db"
-
-# Создаём менеджер
-try:
-    from shared.db_logic import DB_Manager
-    manager = DB_Manager(str(db_path))
-    print("✅ Менеджер БД создан")
-except Exception as e:
-    print(f"❌ Ошибка создания менеджера: {e}")
-    manager = None
+sys.path.append(str(Path(__file__).parent.parent))
+from shared.db_logic import DB_Manager
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
@@ -489,7 +480,7 @@ async def warn_user(interaction: discord.Interaction, member: discord.Member = N
         3: member.guild.get_role(THIRD_WARN_ROLE)
     }
     user_id = interaction.user.id
-    user_data = manager.get_user_ruler(user_id)
+    user_data = await manager.get_user_ruler(user_id)
     current_warns = user_data["warnings"]
     next_warn = current_warns + 1
     if next_warn <= 3:
@@ -507,7 +498,7 @@ async def warn_user(interaction: discord.Interaction, member: discord.Member = N
     if not any(role.id == WARNINGS_CATEGORY_ROLE for role in member.roles):
         await member.add_roles(roles['category'])
     
-    manager.update_user_ruler(user_id, next_warn, user_data['reputation'])
+    await manager.update_user_ruler(user_id, next_warn, user_data['reputation'])
 
 async def send_dm_welcome(member: discord.Member):
     try:
@@ -891,7 +882,7 @@ async def on_member_remove(member):
     if member.bot:
         return
     current_roles = [role.id for role in member.roles if role.name != "@everyone"]
-    manager.update_user_roles_ruler(member.id, current_roles)
+    await manager.update_user_roles_ruler(member.id, current_roles)
 
 @bot.event
 async def on_member_join(member):
@@ -900,7 +891,7 @@ async def on_member_join(member):
         await channel.send(f"<:neutralizeemoji:1515694760990347325> ʙᴩᴀжᴇᴄᴋоᴇ уᴄᴛᴩойᴄᴛʙо, {member.mention}, **быᴧо нᴇйᴛᴩᴀᴧизоʙᴀно** ᴧучɯиʍи ᴄᴨᴇц-оᴛᴩядᴀʍи.")
         return await member.ban(reason="Неавторизованный бот")
     
-    roles_to_restore = manager.get_user_roles_ruler(member.id)
+    roles_to_restore = await manager.get_user_roles_ruler(member.id)
     roles_objects = []
     for role_id in roles_to_restore:
         role = member.guild.get_role(role_id)
@@ -1006,6 +997,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_RULER')
+    manager = DB_Manager('fg_db.db')
     if TOKEN:
         bot.run(TOKEN)
     else:
