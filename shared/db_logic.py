@@ -1,4 +1,4 @@
-import sqlite3, os
+import sqlite3
 
 class DB_Manager:
     def __init__(self, database):
@@ -12,7 +12,7 @@ class DB_Manager:
         except Exception as e:
             print(f"⚠️ БД НЕ ДОСТУПНА: {e}")
 
-    async def create_tables(self):
+    def create_tables(self):
         conn = sqlite3.connect(self.database, timeout=10)
         with conn:
             # The Ruler
