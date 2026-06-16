@@ -9,6 +9,12 @@ parent_dir = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(parent_dir)
 from db_logic import DB_Manager
 
+# Получаем папку, где лежит текущий файл (bot.py)
+BASE_DIR = Path(__file__).parent.absolute()
+
+# Строим правильный путь к базе данных
+db_path = os.path.join(BASE_DIR, "fg_db.db") # Файл будет лежать рядом со скриптом
+
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
 PREFIX = os.getenv('COMMAND_PREFIX')
@@ -1009,7 +1015,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_RULER')
-    manager = DB_Manager("/data/fg_db.db")
+    manager = DB_Manager(db_path)
     if TOKEN:
         bot.run(TOKEN)
     else:
