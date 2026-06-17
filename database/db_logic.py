@@ -31,9 +31,11 @@ class DB_Manager:
                                 last_water REAL DEFAULT 0)''') 
             
             # The Fun Bot
-            conn.execute('''CREATE TABLE IF NOT EXISTS user_current_aura (
+            conn.execute('''CREATE TABLE IF NOT EXISTS user_fun_time (
                                 user_id INTEGER PRIMARY KEY,
-                                current_aura TEXT DEFAULT None
+                                current_aura TEXT DEFAULT None,
+                                count_herb INTEGER DEFAULT 0,
+                                last_time_herb REAL DEFAULT 0
                         )''')
             conn.execute('''CREATE TABLE IF NOT EXISTS user_auras (
                                 user_id INTEGER,
@@ -102,6 +104,45 @@ class DB_Manager:
             print(f"Integrity error: {e}")
             return False
 
+    # The Fun Bot
+    async def get_user_funbot(self, user_id):
+        conn = None
+        try:
+            conn = sqlite3.connect(self.database, timeout=5)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute("SELECT current_aura, count_herb, last_time_herb FROM user_fun_time WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute("INSERT INTO user_fun_time (user_id) VALUES (?)", (user_id,))
+                conn.commit()
+                row = (0, 0, 0.0)
+            conn.close()
+            return {
+                "current_aura": row[0], 
+                "count_herb": row[1], 
+                "last_time_herb": row[2],
+            }
+        except sqlite3.OperationalError as e:
+            print(f"⚠️ Ошибка БД в get_user_economic: {e}")
+            return None
+        except Exception as e:
+            print(f"❌ Другая ошибка: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
+    async def update_user_funbot(self, user_id, current_aura, count_herb, last_time_herb):
+        conn = sqlite3.connect(self.database, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE user_fun_time
+            SET current_aura = ?, count_herb = ?, last_time_herb = ? 
+            WHERE user_id = ?
+        """, (current_aura, count_herb, last_time_herb, user_id))
+        conn.commit()
+        conn.close()
 
     # The Economic
     async def get_user_economic(self, user_id):
@@ -146,4 +187,4 @@ class DB_Manager:
         conn.close()
 
 if __name__ == '__main__':
-    manager = DB_Manager('fg_db.db')
+    manager = DB_Manager('database\\fg_db.db')

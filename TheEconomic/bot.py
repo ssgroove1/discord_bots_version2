@@ -4,7 +4,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
-from shared.db_logic import DB_Manager
+from database.db_logic import DB_Manager
 
 # Настройки бота
 intents = discord.Intents.default()
@@ -269,7 +269,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_ECONOMIC')
-    manager = DB_Manager('fg_db.db')
+    manager = DB_Manager('database/fg_db.db')
     if TOKEN:
         bot.run(TOKEN)
     else:

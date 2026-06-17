@@ -6,7 +6,7 @@ from discord import app_commands
 from datetime import datetime
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
-from shared.db_logic import DB_Manager
+from database.db_logic import DB_Manager
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
@@ -472,7 +472,6 @@ def warn_text(num):
     return {1: "ⲡⲉⲣⲃыⲙ", 2: "ⲃⲧⲟⲣыⲙ", 3: "ⲧⲣⲉⲧьⲉⲙ"}.get(num, "очᴇᴩᴇдныʍ")
 
 async def warn_user(interaction: discord.Interaction, member: discord.Member = None, reason: str ="Не указана"):
-    global warns
     roles = {
         'category': member.guild.get_role(WARNINGS_CATEGORY_ROLE),
         1: member.guild.get_role(FIRST_WARN_ROLE),
@@ -716,7 +715,7 @@ async def unmute_member(interaction: discord.Interaction, member: discord.Member
     else:
         await interaction.response.send_message("❌ У этого пользователя нет мута!", ephemeral=True)
 
-@bot.tree.command(name='warn', description='Выдать предупреждение пользователю.') # IN PROGRESS
+@bot.tree.command(name='warn', description='Выдать предупреждение пользователю.')
 @app_commands.default_permissions(moderate_members=True, ban_members=True)
 async def warn_member(interaction: discord.Interaction, member: discord.Member, reason: str ="Не указана"):
     """Выдает предупреждение"""
@@ -732,6 +731,26 @@ async def warn_member(interaction: discord.Interaction, member: discord.Member, 
     await warn_user(interaction, member, reason)
     channel = bot.get_channel(MOD_LOGS_COMMANDS)
     await channel.send(f"[<:warnemoji:1515687856549658774>] Пользователь {interaction.user.mention} использовал команду **/warn** на игроке {member.mention}, причина: {reason}")
+
+@bot.tree.command(name='unwarn', description='Снять предупреждение с пользователя.')
+@app_commands.default_permissions(moderate_members=True, ban_members=True)
+async def unwarn_member(interaction: discord.Interaction, member: discord.Member):
+    user_data = await manager.get_user_ruler(member.id)
+    if user_data["warnings"] <= 0:
+        return await interaction.response.send_message(f"❌ {member.mention} нᴇ иʍᴇᴇᴛ ᴨᴩᴇдуᴨᴩᴇждᴇний.", ephemeral=True)
+    
+    roles = {1: FIRST_WARN_ROLE, 2: SECOND_WARN_ROLE, 3: THIRD_WARN_ROLE}
+    await member.remove_roles(interaction.guild.get_role(roles[user_data["warnings"]]))
+    if user_data["warnings"] - 1 > 0:
+        await member.add_roles(interaction.guild.get_role(roles[user_data["warnings"] - 1]))
+    else:
+        await member.remove_roles(interaction.guild.get_role(WARNINGS_CATEGORY_ROLE))
+    new_warns = user_data["warnings"] - 1
+    await manager.update_user_ruler(member.id, new_warns, user_data['reputation'])
+    await interaction.response.send_message(f"<:unbanemoji:1515696568156557433> {member.mention} ᴀᴨᴇᴧᴧиᴩоʙᴀн, ᴄняᴛо 1 ᴨᴩᴇдуᴨᴩᴇждᴇниᴇ.")
+    channel = bot.get_channel(MOD_LOGS_COMMANDS)
+    if channel:
+        await channel.send(f"[<:unbanemoji:1515696568156557433>] Пользователь {interaction.user.mention} использовал команду **/unwarn** на игроке {member.mention}.")
 
 @bot.tree.command(name='modpanel', description='Панель модерации.')
 @app_commands.default_permissions(administrator=True)
@@ -823,6 +842,11 @@ async def on_message(message):
     if message.author.bot and message.author.id not in trusted_bots:
         await message.author.ban(reason="Неавторизованный бот")
         return
+    if bot.user in message.mentions and message.author.id == DEVELOPER_ID:
+        await message.channel.send(f"{message.author.mention}, бот ещё жив! ✅")
+    if message.author.guild_permissions.administrator:
+        await bot.process_commands(message)
+        return
     urls = re.findall(URL_REGEX, message.content.lower())
     for url in urls:
         is_gif = any(re.search(pattern, url) for pattern in GIF_PATTERNS)
@@ -840,11 +864,6 @@ async def on_message(message):
             except discord.NotFound:
                 pass
             break  
-    if bot.user in message.mentions and message.author.id == DEVELOPER_ID:
-        await message.channel.send(f"{message.author.mention}, бот ещё жив! ✅")
-    if message.author.guild_permissions.administrator:
-        await bot.process_commands(message)
-        return
     if await anti_spam.is_muted(message.author):
         await message.delete()
         return
@@ -997,7 +1016,7 @@ async def on_ready():
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_RULER')
-    manager = DB_Manager('fg_db.db')
+    manager = DB_Manager('shared/fg_db.db')
     if TOKEN:
         bot.run(TOKEN)
     else:

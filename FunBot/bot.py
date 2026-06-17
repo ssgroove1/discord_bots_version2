@@ -1,15 +1,23 @@
-import discord, os, asyncio, aiohttp, random, re
+import discord, os, asyncio, aiohttp, random, re, sys, time
 from dotenv import load_dotenv
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+from database.db_logic import DB_Manager
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
 PREFIX = os.getenv('COMMAND_PREFIX')
 COUNT_ROLE = int(os.getenv('COUNT_BAD_ROLE'))
+SPECIALIST_HERB_ROLE = int(os.getenv('SPECIALIST_HERB_ROLE_ID'))
+UMBRELLA_CORP_ROLE = int(os.getenv('UMBRELLA_CORP_ROLE_ID'))
+AL_WESKER_ROLE = int(os.getenv('AL_WESKER_ROLE_ID'))
+TIRAN_ROLE = int(os.getenv('TIRAN_ROLE_ID'))
+T_VIRUS_ROLE = int(os.getenv('T_VIRUS_ROLE_ID'))
+BSAA_ROLE = int(os.getenv('BSAA_ROLE_ID'))
 COMMANDS_CHANNEL = int(os.getenv('COMMANDS_CHANNEL_ID'))
 MOD_COMMANDS_CHANNEL = int(os.getenv('MOD_COMMANDS_CHANNEL_ID'))
 COUNT_CHANNEL = int(os.getenv('COUNT_CHANNEL_ID'))
@@ -326,20 +334,70 @@ async def eight_ball(interaction: discord.Interaction, question: str = None):
     )
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
-# @bot.tree.command(name="herb", description="Смешать травы (Resident Evil)")
-# @app_commands.describe(color="Выберите цвет, примеры: зеленая, зеленая+красная")
-# async def herb(interaction: discord.Interaction, color: str):
-#     herbs = {
-#         "зеленая": "Вы восстанавливаете 30 HP 🌿",
-#         "красная": "Вы наносите 20 урона + временный бафф 🩸",
-#         "синяя": "Снимает отравление (и глупые эффекты) 💙",
-#         "зеленая+красная": "60 HP + бафф 💚❤️",
-#         "зеленая+синяя": "40 HP + антидот 💚💙"
-#     }
+@bot.tree.command(name="herb", description="Смешать травы для получения разных комбинаций (Resident Evil)")
+@app_commands.describe(color="Выберите цвет, примеры: зеленая, красная, синяя, зеленая+красная")
+async def herb(interaction: discord.Interaction, color: str):
+    herbs = {
+        "зеленая": "ʙᴀɯ ᴨᴇᴩᴄонᴀж иᴄцᴇᴧён. <:plantemoji:1516711202544422932>",
+        "красная": "ʙы ᴨоᴧучиᴧи ʙᴩᴇʍᴇнный бᴀɸɸ ᴋ уᴩону. <:swordsemoji:1516712211563810836>",
+        "синяя": "ᴄниʍᴀᴇᴛ оᴛᴩᴀʙᴧᴇниᴇ. (и ᴦᴧуᴨыᴇ ϶ɸɸᴇᴋᴛы) <:poisonemoji:1516712752352202862>",
+        "зеленая+красная": "иᴄцᴇᴧᴇниᴇ <:plantemoji:1516711202544422932> + ʙᴩᴇʍᴇнный бᴀɸɸ. <:swordsemoji:1516712211563810836>",
+        "зеленая+синяя": "иᴄцᴇᴧᴇниᴇ <:plantemoji:1516711202544422932> + ᴨоᴧучиᴧ ᴀнᴛидоᴛ. <:antidotemoji:1516713811393118278>",
+        "красная+синяя": "ʙᴩᴇʍᴇнный бᴀɸɸ ᴋ уᴩону <:swordsemoji:1516712211563810836> + ᴀнᴛидоᴛ. <:antidotemoji:1516713811393118278>",
+        "зеленая+красная+синяя": "ᴨоᴧноᴇ иᴄцᴇᴧᴇниᴇ <:plantemoji:1516711202544422932> + ʙᴩᴇʍᴇнный бᴀɸɸ <:swordsemoji:1516712211563810836> + ᴀнᴛидоᴛ. <:antidotemoji:1516713811393118278>",
+        "зеленая+зеленая": "ʙы ᴨоᴧноᴄᴛью ʙоᴄᴄᴛᴀноʙиᴧиᴄь! <:heartemoji:1516740800518557696>",
+        "зеленая+зеленая+зеленая": "ᴛᴩᴇбуᴇʍᴀя ноᴩʍᴀ нᴇ быᴧᴀ ʙыᴨоᴧнᴇнᴀ... (ɯᴀнᴄ 20%) <:brokenglassemoji:1516742443104731136>",
+        "красная+красная": "ʙы ᴨоᴧучᴀᴇᴛᴇ ᴄиᴧу ᴛиᴩᴀнᴀ нᴀ нᴇᴋоᴛоᴩоᴇ ʙᴩᴇʍя! <:tiranemoji:1516747539918098432>",
+        "красная+красная+красная": "ᴛᴩᴇбуᴇʍᴀя ноᴩʍᴀ нᴇ быᴧᴀ ᴄобᴧюдᴇнᴀ... (ɯᴀнᴄ 10%) <:brokenglassemoji:1516742443104731136>",
+        "синяя+синяя": ": ''϶ᴛоᴛ ᴀнᴛидоᴛ ʍожᴇᴛ ʙыᴧᴇчиᴛь ʙᴄё!'' <:antidotemoji:1516713811393118278>",
+        "синяя+синяя+синяя": "ʙᴀɯ ᴀнᴛидоᴛ ᴨᴩизнᴀн оᴨᴀᴄныʍ и нᴇᴄᴛᴀбиᴧьныʍ... (ɯᴀнᴄ 15%) <:brokenglassemoji:1516742443104731136>"
+    }
     
-#     color_lower = color.lower().strip()
-#     result = herbs.get(color_lower, "🧪 Трава не сочетается... Попробуй еще раз.")
-#     await interaction.response.send_message(f"🍃 {result}")
+    key = '+'.join(sorted(color.lower().replace(' ', '').split('+')))
+    result = herbs.get(key, None)
+    if result is None:
+        await interaction.response.send_message(f"{interaction.user.mention}, 🧪 ᴛᴩᴀʙы нᴇ ᴄочᴇᴛᴀюᴛᴄя... ᴨоᴨᴩобуй ᴇщᴇ ᴩᴀз. (Иᴄᴨоᴧьзуй: зᴇᴧᴇнᴀя, ᴋᴩᴀᴄнᴀя, зеленая+красная)")
+        return
+    user_id = interaction.user.id
+    user_info = await manager.get_user_funbot(user_id)
+    current_time = time.time()
+    
+    time_passed = current_time - user_info["last_time_herb"]
+    if time_passed < 21600:
+        seconds_left = int(21600 - time_passed)
+        hours = seconds_left // 3600
+        minutes = (seconds_left % 3600) // 60
+        await interaction.response.send_message(f"**❌ {interaction.user.mention}, вы уже смешивали травы!**\n⌛ Осталось: **{hours} ч. {minutes} мин.**", ephemeral=True)
+        return
+    
+    special_combos = {
+        "красная+красная+красная": (TIRAN_ROLE, 0.1, "ʙы ᴨоᴧучᴀᴇᴛᴇ ᴄиᴧу ᴛиᴩᴀнᴀ из ʀᴇsɪᴅᴇɴᴛ ᴇᴠɪʟ! <:tiranemoji:1516747539918098432>"),
+        "зеленая+зеленая+зеленая": (T_VIRUS_ROLE, 0.2, "ʙы ᴄоздᴀᴇᴛᴇ ноʙый ʙиᴩуᴄ, нᴀзыʙᴀя ᴇᴦо ᴛ-ᴠɪʀᴜs! <:tvirusemoji:1516761340579020910>"),
+        "синяя+синяя+синяя": (BSAA_ROLE, 0.15, "ʙы ʙᴄᴛуᴨᴀᴇᴛᴇ ʙ ᴩяды ϶ᴧиᴛы, 𝗕𝗦𝗔𝗔! <:soldieremoji:1516779793624993843>")
+    }
+    
+    if key in special_combos:
+        role_id, chance, success_msg = special_combos[key]
+        if random.random() < chance:
+            role = interaction.guild.get_role(role_id)
+            await interaction.user.add_roles(role, reason="🧪 Заслужил роль")
+            result = success_msg  
+    
+    new_count = user_info["count_herb"] + 1
+    await interaction.response.send_message(f"{interaction.user.mention}, {result}")
+    role_checks = [
+        (5, SPECIALIST_HERB_ROLE, "<:giveawayemoji:1515792000279121930> ᴨоздᴩᴀʙᴧяю! ʙы ᴨоᴧучиᴧи ᴩоᴧь {}!"),
+        (10, UMBRELLA_CORP_ROLE, "<:umbrellaemoji:1516757365800833146> ᴜᴍʙʀᴇʟʟᴀ ᴄᴏʀᴘᴏʀᴀᴛɪᴏɴ ᴦоᴩдиᴛᴄя ʙᴀʍи, ʙы ᴨоᴧучиᴧи ᴩоᴧь {}!")
+        (25, AL_WESKER_ROLE, "<:d0cabb52b2db458489ad66afc62fc0ec:1516782385566449674> ʙы ᴄᴛᴀᴧи оᴄноʙоᴨоᴧожниᴋоʍ ᴜᴍʙʀᴇʟʟᴀ ᴄᴏʀᴘᴏʀᴀᴛɪᴏɴ и ᴨоᴧучᴀᴇᴛᴇ ᴩоᴧь {}!")
+    ]
+    
+    for count, role_id, message_template in role_checks:
+        if new_count == count:
+            role = interaction.guild.get_role(role_id)
+            await interaction.user.add_roles(role, reason="🧪 Заслужил роль")
+            await interaction.followup.send(message_template.format(role.mention), ephemeral=True)
+            break
+    await manager.update_user_funbot(user_id, user_info["current_aura"], new_count, current_time)
 
 @bot.tree.command(name="giveaway", description="Запустить новый розыгрыш")
 @app_commands.describe(
@@ -498,7 +556,7 @@ async def on_message(message):
             if user_number != next_number_in_count_channel:
                 raise ValueError("Не по порядку")
             if user_number in special_messages:
-                await message.channel.send(f"**{message.author.mention}{special_messages[user_number]}**")
+                await message.channel.send(f"**{message.author.mention}{special_messages[user_number]}**", delete_after=60)
             elif user_number % 100 == 0:
                 await message.channel.send(f"**ⲡⲟⲗьⳅⲟⲃⲁⲧⲉⲗυ, ⲃы ⲇⲟⲥⲧυⲅⲁⲉⲧⲉ ⲃⲉⲣɯυⲏ! ⲅⲟⲣⲿⲩⲥь ⲃⲁⲙυ! <a:yuik:1514940189988880507>**\nʙы ᴨᴩᴇодоᴧᴇʙᴀᴇᴛᴇ оᴛʍᴇᴛᴋу ʙ {user_number}, нᴇ ᴄдᴀʙᴀйᴛᴇᴄь! <a:oshimai:1514940166626742382>")
             elif user_number % 50 == 0:
@@ -584,6 +642,7 @@ async def on_ready():
 if __name__ == "__main__":
     # Загружаем токен из .env файла 
     TOKEN = os.getenv('BOT_TOKEN_FUNBOT')
+    manager = DB_Manager('database/fg_db.db')
     if TOKEN:
         bot.run(TOKEN)
     else:
