@@ -387,7 +387,7 @@ async def herb(interaction: discord.Interaction, color: str):
     await interaction.response.send_message(f"{interaction.user.mention}, {result}")
     role_checks = [
         (5, SPECIALIST_HERB_ROLE, "<:giveawayemoji:1515792000279121930> ᴨоздᴩᴀʙᴧяю! ʙы ᴨоᴧучиᴧи ᴩоᴧь {}!"),
-        (10, UMBRELLA_CORP_ROLE, "<:umbrellaemoji:1516757365800833146> ᴜᴍʙʀᴇʟʟᴀ ᴄᴏʀᴘᴏʀᴀᴛɪᴏɴ ᴦоᴩдиᴛᴄя ʙᴀʍи, ʙы ᴨоᴧучиᴧи ᴩоᴧь {}!")
+        (10, UMBRELLA_CORP_ROLE, "<:umbrellaemoji:1516757365800833146> ᴜᴍʙʀᴇʟʟᴀ ᴄᴏʀᴘᴏʀᴀᴛɪᴏɴ ᴦоᴩдиᴛᴄя ʙᴀʍи, ʙы ᴨоᴧучиᴧи ᴩоᴧь {}!"),
         (25, AL_WESKER_ROLE, "<:d0cabb52b2db458489ad66afc62fc0ec:1516782385566449674> ʙы ᴄᴛᴀᴧи оᴄноʙоᴨоᴧожниᴋоʍ ᴜᴍʙʀᴇʟʟᴀ ᴄᴏʀᴘᴏʀᴀᴛɪᴏɴ и ᴨоᴧучᴀᴇᴛᴇ ᴩоᴧь {}!")
     ]
     
@@ -642,7 +642,7 @@ async def on_ready():
 if __name__ == "__main__":
     # Загружаем токен из .env файла 
     TOKEN = os.getenv('BOT_TOKEN_FUNBOT')
-    manager = DB_Manager('database/fg_db.db')
+    manager = DB_Manager('/app/database/fg_db.db')
     if TOKEN:
         bot.run(TOKEN)
     else:
