@@ -20,6 +20,13 @@ class DB_Manager:
                                 role_id INTEGER,
                                 FOREIGN KEY (user_id) REFERENCES user_info(user_id)
                         )''')
+            conn.execute("""CREATE TABLE IF NOT EXISTS user_level (
+                                user_id INTEGER PRIMARY KEY,
+                                xp INTEGER DEFAULT 0,
+                                level INTEGER DEFAULT 0,
+                                role TEXT DEFAULT 'Нет роли'
+                            )
+                        """)
             
             # The Economic
             conn.execute('''CREATE TABLE IF NOT EXISTS user_balance (
@@ -40,36 +47,38 @@ class DB_Manager:
             conn.execute('''CREATE TABLE IF NOT EXISTS user_auras (
                                 user_id INTEGER,
                                 aura TEXT,
-                                FOREIGN KEY (user_id) REFERENCES user_current_aura(user_id)
+                                FOREIGN KEY (user_id) REFERENCES user_fun_time(user_id)
                         )''')
             conn.commit()
     # The Ruler
     async def get_user_ruler(self, user_id):
         conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
-        cursor.execute("SELECT warnings, reputation FROM user_info WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT warnings, reputation, last_time_reputation FROM user_info WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
         if row is None:
             cursor.execute("INSERT INTO user_info (user_id) VALUES (?)", (user_id,))
             conn.commit()
-            row = (0, 0)
+            row = (0, 0, 0.0)
         conn.close()
         return {
             "warnings": row[0], 
-            "reputation": row[1], 
+            "reputation": row[1],
+            "last_time_reputation": row[2],
         }
     
-    async def update_user_ruler(self, user_id, warnings, reputation):
+    async def update_user_ruler(self, user_id, warnings, reputation, last_time_reputation):
         conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE user_info
-            SET warnings = ?, reputation = ?
+            SET warnings = ?, reputation = ?, last_time_reputation = ?
             WHERE user_id = ?
-        """, (warnings, reputation, user_id))
+        """, (warnings, reputation, last_time_reputation, user_id))
         conn.commit()
         conn.close()
 
+    # Roles
     async def get_user_roles_ruler(self, user_id):
         conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
@@ -103,6 +112,31 @@ class DB_Manager:
             conn.close()
             print(f"Integrity error: {e}")
             return False
+        
+    # Level up
+    async def get_user_data(self, user_id: int):
+        conn = sqlite3.connect(self.database, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("SELECT xp, level, role FROM user_level WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {"xp": row[0], "level": row[1], "role": row[2]}
+        return {"xp": 0, "level": 0, "role": "Нет роли"}
+
+    async def update_user_data(self, user_id: int, xp: int, level: int, role: str):
+        conn = sqlite3.connect(self.database, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_level (user_id, xp, level, role) 
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET xp = ?, level = ?, role = ?
+        """, (user_id, xp, level, role, xp, level, role))
+        conn.commit()
+        conn.close()
+
+    async def get_xp_needed(self, current_level: int) -> int:
+        return 100 + (current_level * 100)
 
     # The Fun Bot
     async def get_user_funbot(self, user_id):

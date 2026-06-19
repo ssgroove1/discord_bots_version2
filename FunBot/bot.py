@@ -337,6 +337,9 @@ async def eight_ball(interaction: discord.Interaction, question: str = None):
 @bot.tree.command(name="herb", description="Смешать травы для получения разных комбинаций (Resident Evil)")
 @app_commands.describe(color="Выберите цвет, примеры: зеленая, красная, синяя, зеленая+красная")
 async def herb(interaction: discord.Interaction, color: str):
+    if interaction.channel.id != COMMANDS_CHANNEL and interaction.channel.id != MOD_COMMANDS_CHANNEL:
+        await interaction.response.send_message(f"❌ Эта команда работает только в канале <#{COMMANDS_CHANNEL}>!", ephemeral=True)
+        return
     herbs = {
         "зеленая": "ʙᴀɯ ᴨᴇᴩᴄонᴀж иᴄцᴇᴧён. <:plantemoji:1516711202544422932>",
         "красная": "ʙы ᴨоᴧучиᴧи ʙᴩᴇʍᴇнный бᴀɸɸ ᴋ уᴩону. <:swordsemoji:1516712211563810836>",
@@ -363,8 +366,8 @@ async def herb(interaction: discord.Interaction, color: str):
     current_time = time.time()
     
     time_passed = current_time - user_info["last_time_herb"]
-    if time_passed < 21600:
-        seconds_left = int(21600 - time_passed)
+    if time_passed < 10800:
+        seconds_left = int(10800 - time_passed)
         hours = seconds_left // 3600
         minutes = (seconds_left % 3600) // 60
         await interaction.response.send_message(f"**❌ {interaction.user.mention}, вы уже смешивали травы!**\n⌛ Осталось: **{hours} ч. {minutes} мин.**", ephemeral=True)
