@@ -33,7 +33,7 @@ GIF_PATTERNS = [
 SUPPORT_ROLES = [1513487279749074994, 1513487556887449692, 1513487970127183912, 1513268159598166127, 1515424488014221524, 1513261409209811055]
 PANEL_CONFIGS = {}
 LEVEL_ROLES = {
-    1: 1516414618212503632,  # ID роли за 1 уровень
+    1: 1517605063013568573,  # ID роли за 1 уровень
     5: 1513266642988171304,  # ID роли за 5 уровень
     10: 1512913425519345674,  # ID роли за 10 уровень
 }
@@ -1163,6 +1163,9 @@ async def user_info(interaction: discord.Interaction, member: discord.Member = N
 @bot.tree.command(name="level", description="Показать карточку уровня и опыта участника.")
 @app_commands.describe(member="Выберите участника сервера, чтобы посмотреть его уровень (необязательно)")
 async def level_command(interaction: discord.Interaction, member: discord.Member = None):
+    if interaction.channel.id != COMMANDS_CHANNEL and interaction.channel.id != MOD_COMMANDS_CHANNEL:
+        await interaction.response.send_message(f"❌ Эта команда работает только в канале <#{COMMANDS_CHANNEL}>!", ephemeral=True)
+        return
     await interaction.response.defer()
     
     target_member = member or interaction.user
@@ -1222,7 +1225,7 @@ async def on_message(message):
                 await safe_reply(message, "<:forbbiden2emoji:1517479332866429008> Вы не можете дать репутацию самому себе!", delete_after=5)
                 await safe_delete(message, delay=2)
                 return
-            user_data = await manager.get_user_ruler(target_user.id)
+            user_data = await manager.get_user_ruler(message.author.id)
             current_time = time.time()
     
             time_passed = current_time - user_data["last_time_reputation"]
@@ -1231,9 +1234,14 @@ async def on_message(message):
                 hours = seconds_left // 3600
                 minutes = (seconds_left % 3600) // 60
                 await safe_reply(message, f"**<:forbbiden2emoji:1517479332866429008> {message.author.mention}, вы не можете часто использовать эту команду!**\n⌛ Осталось: **{hours} ч. {minutes} мин.**", delete_after=5)
+                await safe_delete(message, delay=2)
                 return
-            new_reputation = int(user_data["reputation"]+1)
-            await manager.update_user_ruler(target_user.id, user_data["warnings"], new_reputation, current_time)
+            target_data = await manager.get_user_ruler(target_user.id)
+            new_reputation = int(target_data["reputation"]+1)
+            # Target user
+            await manager.update_user_ruler(target_user.id, target_data["warnings"], new_reputation, target_data["last_time_reputation"])
+            # Message author
+            await manager.update_user_ruler(message.author.id, user_data["warnings"], user_data["reputation"], current_time)
             await safe_reply(message, f"{message.author.mention} ʙыдᴀᴧ ᴩᴇᴨуᴛᴀцию {target_user.mention}! <:reputationemoji:1517480379286556832>", delete_after=60)
             return
         else:
