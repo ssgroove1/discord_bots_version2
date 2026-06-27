@@ -260,14 +260,14 @@ async def fish(interaction: discord.Interaction):
     if chance < 0.01:
         fish_text = "ⲏⲁⲥⲧⲟяպⲉⲅⲟ ⲙⲉⲅⲁⲗⲁⲇⲟⲏⲁ! <:megaladonemoji:1518011720499593246>"
         reward = 37
-        role = await interaction.guild.get_role(1518011868709388339)
+        role = interaction.guild.get_role(1518011868709388339)
         if role:
             await interaction.user.add_roles(role, reason=f"Выловил улов!")
             await safe_send(interaction, "<:trophyemoji:1517928090708345032> Вам выдана роль за улов!", ephemeral=True)
     elif chance < 0.1:
         fish_text = "ⲿυⲃⲩю ⲁⲕⲩⲗⲩ! <:sharkemoji:1518009750078492944>"
         reward = 13
-        role = await interaction.guild.get_role(1518010342410686606)
+        role = interaction.guild.get_role(1518010342410686606)
         if role:
             await interaction.user.add_roles(role, reason=f"Выловил улов!")
             await safe_send(interaction,"<:trophyemoji:1517928090708345032> Вам выдана роль за улов!", ephemeral=True)

@@ -687,7 +687,7 @@ async def mask(inter: discord.Interaction):
     mask_time = datetime.now()
     cooldown_mask = datetime.now() + timedelta(hours=1, minutes=30)
     try:
-        await inter.user.edit(nick=f"{inter.user.display_name}")
+        await inter.user.edit(nick=f"[𝙎𝘾𝙋 035] {inter.user.display_name}")
     except discord.Forbidden:
         pass
     role = inter.guild.get_role(MASK_ROLE_ID)
@@ -942,7 +942,7 @@ async def on_message(message):
             ]).format(message.content)
         await message.delete()
         if webhook:
-            await webhook.send(new, username=f"[𝙎𝘾𝙋 035] {message.author.display_name}", avatar_url='https://i.pinimg.com/1200x/dd/bb/e8/ddbbe8338846172fd52739ee99a12436.jpg')
+            await webhook.send(new, username=f"{message.author.display_name}", avatar_url='https://i.pinimg.com/1200x/dd/bb/e8/ddbbe8338846172fd52739ee99a12436.jpg')
         else:
             await safe_send(message, new)
     if message.channel.id == COUNT_CHANNEL:
