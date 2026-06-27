@@ -1985,7 +1985,7 @@ async def on_member_join(member):
 async def on_message_delete(message):
     if message.author.bot or not message.content:
         return
-    log_channel = await safe_fetch_channel(bot, 1514703710930997250)
+    log_channel = await safe_fetch_channel(bot, MOD_LOGS)
     if not log_channel:
         return
     user = await safe_fetch_user(bot, message.author.id)
@@ -2048,7 +2048,7 @@ async def on_message_delete(message):
 async def on_message_edit(before, after):
     if before.author.bot or before.content == after.content:
         return
-    log_channel = await safe_fetch_channel(bot, 1514703710930997250)
+    log_channel = await safe_fetch_channel(bot, MOD_LOGS)
     if not log_channel:
         return
     user = await safe_fetch_user(bot, before.author.id)
