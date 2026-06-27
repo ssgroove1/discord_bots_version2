@@ -899,7 +899,9 @@ async def update_command_chats(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     mute_role = interaction.guild.get_role(MUTED_ROLE)
     count_role = interaction.guild.get_role(COUNT_ROLE)
-    special_role = interaction.guild.get_role(LEVEL_ROLES["1"])
+    special_role = interaction.guild.get_role(LEVEL_ROLES[1])
+    channel1 = await safe_fetch_channel(bot, 1468672431144173834)
+    channel2 = await safe_fetch_channel(bot, 1513070963955335238)
     if not mute_role or not count_role:
         await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Роли не найдены!", ephemeral=True)
         return
@@ -928,8 +930,6 @@ async def update_command_chats(interaction: discord.Interaction):
                 send_messages=False,
                 attach_files=False,
                 embed_links=False)
-            channel1 = await safe_fetch_channel(bot, 1468672431144173834)
-            channel2 = await safe_fetch_channel(bot, 1513070963955335238)
             for special_channel in [channel1, channel2]:
                 await special_channel.set_permissions(
                     special_role,

@@ -188,11 +188,11 @@ async def event_loop():
             if channel:
                 embed = discord.Embed(
                     title=f"**ⳅⲁⲅⲁⲇⲟɥⲏыύ ⲕⲟⲏⲧⲉύⲏⲉⲣ** <:containeremoji:1518184249906171945>",
-                    description=f"зᴀᴦᴀдочный ᴋонᴛᴇйнᴇᴩ быᴧ зᴀᴛᴇᴩян ᴄᴩᴇди ᴦᴧубин ʍоᴩᴄᴋих...\nнᴇдᴀʙно у бᴇᴩᴇᴦоʙ быᴧ нᴀйдᴇн зᴀᴛᴇᴩянный ᴋонᴛᴇйнᴇᴩ, ϶ᴋᴄᴨᴇᴩᴛы уʙᴇᴩяюᴛ, чᴛо ᴄᴛоиʍоᴄᴛь ϶ᴛоᴦо ᴋонᴛᴇйнᴇᴩᴀ: `{chest['reward']}` <:physpoints:1515371982571704361>!",
+                    description=f"зᴀᴦᴀдочный ᴋонᴛᴇйнᴇᴩ быᴧ зᴀᴛᴇᴩян ᴄᴩᴇди ᴦᴧубин ʍоᴩᴄᴋих...\nнᴇдᴀʙно у бᴇᴩᴇᴦоʙ быᴧ нᴀйдᴇн зᴀᴛᴇᴩянный ᴋонᴛᴇйнᴇᴩ, ϶ᴋᴄᴨᴇᴩᴛы уʙᴇᴩяюᴛ, чᴛо ᴄᴛоиʍоᴄᴛь ϶ᴛоᴦо ᴋонᴛᴇйнᴇᴩᴀ: `{chest['reward']}` <:physpoints:1515371982571704361>!\n||@here||",
                     color=discord.Color.darker_grey()
                 )
                 embed.set_image(url="https://t4.ftcdn.net/jpg/06/21/67/39/360_F_621673926_NCCh335JeAsxl6Q0n1mmFzHtXSVsaUq3.jpg")
-                await safe_send(channel, embed=embed, view=view)
+                await safe_send(channel, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True), view=view)
         
         if chest['ready'] and time.time() - chest['time'] > 28800:
             chest['ready'] = False
