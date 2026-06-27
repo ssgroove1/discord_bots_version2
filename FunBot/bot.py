@@ -393,7 +393,7 @@ masked_user = None
 mask_time = None
 cooldown_mask = None
 SCP_035_webhook = None
-MASK_ROLE_ID = 1516753427512823918
+MASK_ROLE_ID = 1520061586650173591
 
 special_messages = {
     13: " ᴨоᴧучиᴧ чᴇᴩную ʍᴇᴛᴋу. <:treasureemoji:1515794261839188199>",
@@ -687,7 +687,7 @@ async def mask(inter: discord.Interaction):
     mask_time = datetime.now()
     cooldown_mask = datetime.now() + timedelta(hours=1, minutes=30)
     try:
-        await inter.user.edit(nick=f"[𝙎𝘾𝙋 035] {inter.user.display_name}")
+        await inter.user.edit(nick=f"{inter.user.display_name}")
     except discord.Forbidden:
         pass
     role = inter.guild.get_role(MASK_ROLE_ID)
