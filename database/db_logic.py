@@ -34,8 +34,14 @@ class DB_Manager:
                                 points INTEGER DEFAULT 0,
                                 trees INTEGER DEFAULT 0,
                                 bugs INTEGER DEFAULT 0,
+                                animals INTEGER DEFAULT 0,
+                                werewolfs INTEGER DEFAULT 0,
                                 last_claim REAL DEFAULT 0,
-                                last_water REAL DEFAULT 0)''') 
+                                last_water REAL DEFAULT 0,
+                                last_collect REAL DEFAULT 0,
+                                last_fish REAL DEFAULT 0,
+                                last_bonus REAL DEFAULT 0,
+                                last_rob REAL DEFAULT 0)''') 
             
             # The Fun Bot
             conn.execute('''CREATE TABLE IF NOT EXISTS user_fun_time (
@@ -48,6 +54,11 @@ class DB_Manager:
                                 user_id INTEGER,
                                 aura TEXT,
                                 FOREIGN KEY (user_id) REFERENCES user_fun_time(user_id)
+                        )''')
+            conn.execute('''CREATE TABLE IF NOT EXISTS user_marriages (
+                                first_user_id INTEGER,
+                                second_user_id INTEGER,
+                                created at REAL DEFAULT 0
                         )''')
             conn.commit()
     # The Ruler
@@ -185,19 +196,25 @@ class DB_Manager:
             conn = sqlite3.connect(self.database, timeout=5)
             conn.execute("PRAGMA journal_mode=WAL")
             cursor = conn.cursor()
-            cursor.execute("SELECT points, trees, bugs, last_claim, last_water FROM user_balance WHERE user_id = ?", (user_id,))
+            cursor.execute("SELECT points, trees, bugs, animals, werewolfs, last_claim, last_water, last_collect, last_fish, last_bonus, last_rob FROM user_balance WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             if row is None:
                 cursor.execute("INSERT INTO user_balance (user_id) VALUES (?)", (user_id,))
                 conn.commit()
-                row = (0, 0, 0, 0.0, 0.0)
+                row = (0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             conn.close()
             return {
                 "points": row[0], 
                 "trees": row[1], 
                 "bugs": row[2],
-                "last_claim": row[3],
-                "last_water": row[4]
+                "animals": row[3],
+                "werewolfs": row[4],
+                "last_claim": row[5],
+                "last_water": row[6],
+                "last_collect": row[7],
+                "last_fish": row[8],
+                "last_bonus": row[9],
+                "last_rob": row[10]
             }
         except sqlite3.OperationalError as e:
             print(f"⚠️ Ошибка БД в get_user_economic: {e}")
@@ -209,16 +226,34 @@ class DB_Manager:
             if conn:
                 conn.close()
     
-    async def update_user_economic(self, user_id, points, trees, bugs, last_claim, last_water):
+    async def update_user_economic(self, user_id, points, trees, bugs, animals, werewolfs, last_claim, last_water, last_collect, last_fish, last_bonus, last_rob):
         conn = sqlite3.connect(self.database, timeout=10)
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE user_balance 
-            SET points = ?, trees = ?, bugs = ?, last_claim = ?, last_water = ? 
+            SET points = ?, trees = ?, bugs = ?, animals = ?, werewolfs = ?, last_claim = ?, last_water = ?, last_collect = ?, last_fish = ?, last_bonus = ?, last_rob = ?
             WHERE user_id = ?
-        """, (points, trees, bugs, last_claim, last_water, user_id))
+        """, (points, trees, bugs, animals, werewolfs, last_claim, last_water, last_collect, last_fish, last_bonus, last_rob, user_id))
         conn.commit()
         conn.close()
+
+    def get_leaderboard(self, limit=10):
+        conn = sqlite3.connect(self.database, timeout=10)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            """SELECT user_id, points 
+            FROM user_balance 
+            WHERE points > 0 
+            ORDER BY points DESC 
+            LIMIT ?""",
+            (limit,)
+        )
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return rows
 
 if __name__ == '__main__':
     manager = DB_Manager('database\\fg_db.db')
