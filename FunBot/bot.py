@@ -203,18 +203,27 @@ class get_flower(discord.ui.View):
         self.user = user
         self.target = target
         self.text = text
+        self.is_claimed = False
     
     @discord.ui.button(label="ᴨоᴧучиᴛь цʙᴇᴛы", style=discord.ButtonStyle.primary, emoji="💐")
     async def get_flower_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+
         if interaction.user == self.user:
             await safe_send(interaction, f"🤗 Вы не можете отменить действие!", ephemeral=True)
             return
         elif interaction.user != self.target:
             await safe_send(interaction, f"😡 Цветы не для вас!", ephemeral=True)
             return
+        self.is_claimed = True
         button.disabled = True
-        await interaction.edit_original_response(view=self)
-        await safe_send(interaction, f"🌹 {self.user.mention} дарит вам цветы!\n💌 С пожеланиями: {self.text}", ephemeral=True)
+        try:
+            await interaction.edit_original_response(view=self)
+        except:
+            pass
+        await interaction.followup.send(
+            f"🌹 {self.user.mention} дарит вам цветы!\n💌 С пожеланиями: {self.text}",
+            ephemeral=True)
 
 # ========== ДЕКОРАТОР ==========
 
