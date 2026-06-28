@@ -274,7 +274,7 @@ class TempVoice(commands.Cog):
                 connect=True, 
                 manage_channels=True,
                 move_members=True)
-            await new_channel.set_permissions(member.guild.default_role, connect=True)
+            await new_channel.set_permissions(member.guild.default_role, connect=True, send_messages=True, attach_files=False, embed_links=False)
             await member.move_to(new_channel)
         # 2. Проверяем ВСЕ временные каналы на пустоту (включая те, откуда пользователь вышел)
         await self.check_empty_temp_channels(member.guild)
@@ -889,103 +889,6 @@ async def sync(interaction: discord.Interaction):
     await bot.tree.sync(guild=None)
     await safe_send(interaction, "✅ Команды синхронизированы для текущего сервера.", ephemeral=False)
 
-@bot.tree.command(name='update', description='Обновить текстовые каналы.')
-@app_commands.guild_only()
-@app_commands.default_permissions(administrator=True)
-async def update_command_chats(interaction: discord.Interaction):
-    if interaction.user.id != DEVELOPER_ID:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У тебя нет прав для этой команды.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    mute_role = interaction.guild.get_role(MUTED_ROLE)
-    count_role = interaction.guild.get_role(COUNT_ROLE)
-    special_role = interaction.guild.get_role(LEVEL_ROLES[1])
-    channel1 = await safe_fetch_channel(bot, 1468672431144173834)
-    channel2 = await safe_fetch_channel(bot, 1513070963955335238)
-    if not mute_role or not count_role:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Роли не найдены!", ephemeral=True)
-        return
-    text_count = 0
-    voice_count = 0
-    errors = []    
-    # Текстовые каналы
-    for channel in interaction.guild.channels:
-        # Пропускаем категории
-        if isinstance(channel, discord.CategoryChannel):
-            continue
-        try:
-            # ✅ Используем safe_fetch_channel для безопасности
-            safe_channel = await safe_fetch_channel(interaction.client, channel.id, max_retries=2)
-            if not safe_channel:
-                errors.append(f"❌ Не удалось получить канал {channel.name}")
-                continue
-            # Устанавливаем права для MUTE роли
-            await safe_channel.set_permissions(
-                mute_role,
-                send_messages=False,
-                add_reactions=False)
-            default_role = interaction.guild.default_role
-            await channel.set_permissions(
-                default_role,
-                send_messages=False,
-                attach_files=False,
-                embed_links=False)
-            for special_channel in [channel1, channel2]:
-                await special_channel.set_permissions(
-                    special_role,
-                    send_messages=True,
-                    attach_files=True,
-                    embed_links=True)
-            # Специальные права для COUNT_CHANNEL
-            if channel.id == COUNT_CHANNEL:
-                await safe_channel.set_permissions(
-                    count_role,
-                    send_messages=False,
-                    add_reactions=False)
-            text_count += 1
-        except discord.Forbidden:
-            errors.append(f"❌ Нет прав для канала {channel.name}")
-        except discord.HTTPException as e:
-            if e.status == 429:  # Rate Limit
-                await asyncio.sleep(1)
-                continue
-            errors.append(f"❌ Ошибка в канале {channel.name}: {e}")
-        except Exception as e:
-            errors.append(f"❌ Ошибка в канале {channel.name}: {e}")
-    
-    # ✅ Голосовые каналы
-    for voice_channel in interaction.guild.voice_channels:
-        try:
-            # ✅ Используем safe_fetch_channel
-            safe_channel = await safe_fetch_channel(interaction.client, voice_channel.id, max_retries=2)
-            if not safe_channel:
-                errors.append(f"❌ Не удалось получить голосовой канал {voice_channel.name}")
-                continue
-            await safe_channel.set_permissions(
-                mute_role,
-                connect=False,
-                speak=False)
-            voice_count += 1
-        except discord.Forbidden:
-            errors.append(f"❌ Нет прав для голосового канала {voice_channel.name}")
-        except discord.HTTPException as e:
-            if e.status == 429:
-                await asyncio.sleep(1)
-                continue
-            errors.append(f"❌ Ошибка в голосовом канале {voice_channel.name}: {e}")
-        except Exception as e:
-            errors.append(f"❌ Ошибка в голосовом канале {voice_channel.name}: {e}")
-    result_message = f"✅ Обновление прав завершено!\n"
-    result_message += f"📝 Текстовых каналов: {text_count}\n"
-    result_message += f"🎤 Голосовых каналов: {voice_count}"
-    if errors:
-        result_message += f"\n\n⚠️ Ошибок: {len(errors)}"
-        if len(errors) > 5:
-            result_message += f"\nПервые 5 ошибок:\n" + "\n".join(errors[:5])
-        else:
-            result_message += f"\n" + "\n".join(errors)
-    await safe_send(interaction, result_message, ephemeral=True)
-
 # ========== КОМАНДЫ МОДЕРАЦИИ ==========
 
 @bot.tree.command(name="create_ticket", description="Создать панель тикета.")
@@ -1005,6 +908,7 @@ async def clear_messages(interaction: discord.Interaction, amount: int = None):
     elif amount < 0:
         await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Количество должно быть больше 0!", ephemeral=True)
         return
+    await interaction.response.defer()
     safe_user = await safe_fetch_user(interaction.client, interaction.user.id)
     if safe_user:
         user_mention = safe_user.mention
@@ -1063,6 +967,7 @@ async def kick_member(interaction: discord.Interaction, member: discord.Member, 
     if not interaction.guild.get_member(member.id):
         await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Пользователь не на сервере!", ephemeral=True)
         return
+    await interaction.response.defer()
     safe_user = await safe_fetch_user(interaction.client, member.id)
     if safe_user:
         user_mention = safe_user.mention
@@ -1131,6 +1036,7 @@ async def ban_member(interaction: discord.Interaction, member: discord.Member, r
     if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
         await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя забанить пользователя с ролью выше или равной вашей!", ephemeral=True)
         return
+    await interaction.response.defer()
     safe_user = await safe_fetch_user(interaction.client, member.id)
     if safe_user:
         user_mention = safe_user.mention
@@ -1138,7 +1044,7 @@ async def ban_member(interaction: discord.Interaction, member: discord.Member, r
     # ✅ Получаем канал логов
     log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
     try:
-        await member.ban(reason=f"{reason} (Модератор: {interaction.user})", delete_message_seconds=60)
+        await member.ban(reason=f"{reason} (Модератор: {interaction.user})", delete_message_seconds=86400)
         # ✅ Отправляем сообщение
         await safe_send(interaction, f"<:banemoji:1515689296118677534> {user_mention} **быᴧ уᴄᴛᴩᴀнён** <:neutralizeemoji:1515694760990347325>. ᴨᴩичинᴀ: {reason}", ephemeral=False)
         if log_channel:
@@ -1209,6 +1115,7 @@ async def unban_member(interaction: discord.Interaction, name_or_id: str):
             "<:forbbiden2emoji:1517479332866429008> Бан-лист пуст!",
             ephemeral=True)
         return
+    await interaction.response.defer()
     # ✅ Ищем пользователя
     user = None
     # Поиск по ID
@@ -1308,6 +1215,7 @@ async def mute_member(interaction: discord.Interaction, member: discord.Member, 
     if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
         await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя замутить пользователя с ролью выше вашей!", ephemeral=True)
         return
+    await interaction.response.defer()
     # ✅ Проверка времени
     if minutes is None:
         minutes = 60
@@ -1404,6 +1312,7 @@ async def unmute_member(interaction: discord.Interaction, member: discord.Member
             "<:forbbiden2emoji:1517479332866429008> Роль MUTED_ROLE не найдена!",
             ephemeral=True)
         return
+    await interaction.response.defer()
     # ✅ Получаем канал логов
     log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
 
@@ -1998,8 +1907,22 @@ async def on_member_join(member):
 
 @bot.event
 async def on_message_delete(message):
+    await asyncio.sleep(1)
     if message.author.bot or not message.content:
         return
+    try:
+        async for entry in message.guild.audit_logs(limit=5, action=discord.AuditLogAction.message_delete):
+            # Проверяем, что это удаление нашего сообщения
+            if entry.target.id == message.author.id:
+                # Проверяем, кто удалил
+                deleter = entry.user
+                
+                # ✅ Если удалил ЛЮБОЙ бот - пропускаем
+                if deleter.bot:
+                    return
+                break
+    except Exception as e:
+        print(f"Ошибка аудит-лога: {e}")
     log_channel = await safe_fetch_channel(bot, MOD_LOGS)
     if not log_channel:
         return

@@ -8,7 +8,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from database.db_logic import DB_Manager
 from discord.errors import HTTPException, Forbidden, NotFound
 from discord.ui import Button, View
-from discord import Interaction
+from discord import Interaction, Message
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
@@ -38,6 +38,7 @@ class ClaimButton(Button):
         super().__init__(label="ᴛᴀᴋᴇ ᴀ ᴄᴏɴᴛᴀɪɴᴇʀ", style=discord.ButtonStyle.grey)
     
     async def callback(self, interaction):
+        await interaction.response.defer()
         if not chest['ready']:
             return await safe_send(interaction, "<:accessdeniedemoji:1517986918573408318> Нет сундука", ephemeral=True)
         if chest['claimed']:
@@ -99,6 +100,8 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
                 except:
                     return None
         else:
+            if kwargs.get('ephemeral', False):
+                kwargs.pop('ephemeral', None)
             # Если ответ уже отправлен, используем followup
             for attempt in range(max_retries):
                 try:
@@ -141,40 +144,81 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
     return None
 
 async def safe_edit(interaction_or_message, content=None, max_retries=3, **kwargs):
-    if content is None and not kwargs.get('embed'):
+    if content is None and not kwargs.get('embed') and not kwargs.get('view'):
         return None
-    
-    # Если это Interaction
     if isinstance(interaction_or_message, Interaction):
+        interaction = interaction_or_message
+        
         for attempt in range(max_retries):
             try:
-                await interaction_or_message.response.edit_message(content=content, **kwargs)
+                # Проверяем, был ли уже ответ
+                if interaction.response.is_done():
+                    # Если ответ уже отправлен - используем edit_original_response
+                    await interaction.edit_original_response(content=content, **kwargs)
+                else:
+                    # Если ответа еще не было - отправляем новый
+                    await interaction.response.send_message(content=content, **kwargs)
                 return True
+                
             except HTTPException as e:
-                if e.status == 429:
+                if e.status == 429:  # Rate Limit
                     retry_after = float(e.response.headers.get('Retry-After', 1))
-                    await asyncio.sleep(retry_after)
+                    await asyncio.sleep(retry_after * (attempt + 1))
                     continue
                 else:
+                    print(f"HTTP ошибка при редактировании Interaction: {e.status}")
+                    return False
+                    
+            except Forbidden:
+                print("Нет прав для редактирования Interaction")
+                return False
+                
+            except NotFound:
+                print("Interaction или сообщение не найдены")
+                return False
+                
+            except Exception as e:
+                print(f"Ошибка при редактировании Interaction: {e}")
+                return False
+        
+        print(f"Не удалось отредактировать Interaction после {max_retries} попыток")
+        return False
+    
+    # ====== РЕДАКТИРОВАНИЕ MESSAGE ======
+    elif isinstance(interaction_or_message, Message):
+        message = interaction_or_message
+        
+        for attempt in range(max_retries):
+            try:
+                return await message.edit(content=content, **kwargs)
+                
+            except HTTPException as e:
+                if e.status == 429:  # Rate Limit
+                    retry_after = float(e.response.headers.get('Retry-After', 1))
+                    await asyncio.sleep(retry_after * (attempt + 1))
+                    continue
+                else:
+                    print(f"HTTP ошибка при редактировании Message: {e.status}")
                     return None
-            except:
+                    
+            except Forbidden:
+                print("Нет прав для редактирования Message")
                 return None
+                
+            except NotFound:
+                print("Message не найдено")
+                return None
+                
+            except Exception as e:
+                print(f"Ошибка при редактировании Message: {e}")
+                return None
+        
+        print(f"Не удалось отредактировать Message после {max_retries} попыток")
         return None
     
-    # Если это Message
-    for attempt in range(max_retries):
-        try:
-            return await interaction_or_message.edit(content=content, **kwargs)
-        except HTTPException as e:
-            if e.status == 429:
-                retry_after = float(e.response.headers.get('Retry-After', 1))
-                await asyncio.sleep(retry_after)
-                continue
-            else:
-                return None
-        except:
-            return None
-    return None
+    else:
+        print("Ошибка: передан не Interaction и не Message")
+        return None
 
 async def event_loop():
     while True:
@@ -192,7 +236,7 @@ async def event_loop():
                     color=discord.Color.darker_grey()
                 )
                 embed.set_image(url="https://t4.ftcdn.net/jpg/06/21/67/39/360_F_621673926_NCCh335JeAsxl6Q0n1mmFzHtXSVsaUq3.jpg")
-                await safe_send(channel, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True), view=view)
+                await safe_send(channel, embed=embed, view=view)
         
         if chest['ready'] and time.time() - chest['time'] > 28800:
             chest['ready'] = False
