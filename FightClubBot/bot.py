@@ -43,6 +43,7 @@ LEVEL_ROLES = {
     10: 1512913425519345674,
 }
 trusted_bots = {1514273648364753016, 1513553810369417216, 1512556017492295851, 1515369279724195891, 302050872383242240, 575776004233232386, 315926021457051650}
+bot_deleted_messages = set()
 
 # Настройки бота
 intents = discord.Intents.default()
@@ -532,7 +533,10 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
             # Если ответ уже отправлен, используем followup
             for attempt in range(max_retries):
                 try:
-                    return await destination.followup.send(content, **kwargs)
+                    if kwargs.get('ephemeral', False):
+                        return await destination.followup.send(content, **kwargs)
+                    else:
+                        return await destination.followup.send(content, **kwargs)
                 except HTTPException as e:
                     if e.status == 429:
                         retry_after = float(e.response.headers.get('Retry-After', 1))
@@ -908,7 +912,6 @@ async def clear_messages(interaction: discord.Interaction, amount: int = None):
     elif amount < 0:
         await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Количество должно быть больше 0!", ephemeral=True)
         return
-    await interaction.response.defer()
     safe_user = await safe_fetch_user(interaction.client, interaction.user.id)
     if safe_user:
         user_mention = safe_user.mention
@@ -917,6 +920,8 @@ async def clear_messages(interaction: discord.Interaction, amount: int = None):
     await safe_send(interaction, f"<:clearemoji:1515691240476377218> удᴀᴧᴇниᴇ {amount} ᴄообщᴇний...", ephemeral=True)
     try:
         deleted = await interaction.channel.purge(limit=amount)
+        for msg in deleted:
+            bot_deleted_messages.add(msg.id)
         await safe_edit(interaction, content=f"<:successemoji:1515691944460685372> удᴀᴧᴇно {len(deleted)} ᴄообщᴇний")
         if log_channel:
             try:
@@ -1623,7 +1628,7 @@ async def server_info(interaction: discord.Interaction):
 
 @bot.tree.command(name='репутация', description='Узнайте репутацию пользователя.')
 @app_commands.guild_only()
-async def user_info(interaction: discord.Interaction, member: discord.Member = None):
+async def user_reputation(interaction: discord.Interaction, member: discord.Member = None):
     if interaction.channel.id != COMMANDS_CHANNEL and interaction.channel.id != MOD_COMMANDS_CHANNEL:
         await safe_send(interaction, f"<:forbbiden2emoji:1517479332866429008> Эта команда работает только в канале <#{COMMANDS_CHANNEL}>!", ephemeral=True)
         return
@@ -1775,8 +1780,8 @@ async def on_message(message):
         return
     # ПРОВЕРКА НА ССЫЛКИ
     content_lower = message.content.lower()
-    match = re.search(URL_REGEX, content_lower)  # URL_REGEX должен быть строкой паттерна
-    if match:  # Проверяем, что URL найден
+    match = re.search(URL_REGEX, content_lower)
+    if match and match.group():  # ✅ Проверяем, что match существует
         is_gif = any(re.search(pattern, match.group()) for pattern in AVAILABLE_PATTERNS)
         if not is_gif:
             try:
@@ -1822,9 +1827,6 @@ async def on_message(message):
 async def on_member_remove(member):
     if member.bot:
         return
-    user = await safe_fetch_user(bot, member.id)
-    if not user:
-        print(f"⚠️ Не удалось получить данные пользователя {member.id} при выходе")
     current_roles = [role.id for role in member.roles if role.name != "@everyone"]
     try:
         await manager.update_user_roles_ruler(member.id, current_roles)
@@ -1907,20 +1909,18 @@ async def on_member_join(member):
 
 @bot.event
 async def on_message_delete(message):
-    await asyncio.sleep(3)
-    if message.author.bot or not message.content or message.guild.me.id == message.author.id:
+    if message.id in bot_deleted_messages:
+        bot_deleted_messages.remove(message.id)
         return
-    deleted_by_bot = False
     try:
-        async for entry in message.guild.audit_logs(limit=10, action=discord.AuditLogAction.message_delete):
+        async for entry in message.guild.audit_logs(limit=5, action=discord.AuditLogAction.message_delete):
             if entry.target.id == message.author.id:
-                deleter = entry.user
-                if deleter.bot:
-                    deleted_by_bot = True
+                if entry.user.bot:
+                    return
                 break
-    except Exception as e:
-        print(f"Ошибка аудит-лога: {e}")
-    if deleted_by_bot:
+    except:
+        pass
+    if message.author.bot or not message.content or message.guild.me.id == message.author.id:
         return
     log_channel = await safe_fetch_channel(bot, MOD_LOGS)
     if not log_channel:
@@ -2111,7 +2111,6 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_ready():
-    bot.trusted_set = set(trusted_bots)
     try:
         await bot.tree.sync(guild=None) 
     except Exception as e:

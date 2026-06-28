@@ -462,7 +462,7 @@ async def mask_death_check():
                             except: pass
                         channel = bot.get_channel(1468672223564005649)
                         if channel:
-                            await safe_send(channel, f"<:SCP035_2emoji:1520066884920410311> {user.mention} ᴨоᴦибᴀᴇᴛ оᴛ ʍᴀᴄᴋи одᴇᴩжиʍоᴄᴛи!")
+                            await channel.send(f"<:SCP035_2emoji:1520066884920410311> {user.mention} ᴨоᴦибᴀᴇᴛ оᴛ ʍᴀᴄᴋи одᴇᴩжиʍоᴄᴛи!")
             
             masked_user = None
             mask_time = None
@@ -902,10 +902,10 @@ async def on_message(message):
                 "{} - *я ᴛᴇᴩяю ᴋонᴛᴩоᴧь...*"
             ]).format(message.content)
         await message.delete()
-        if webhook:
-            await webhook.send(new, username=f"{message.author.display_name}", avatar_url='https://i.pinimg.com/1200x/dd/bb/e8/ddbbe8338846172fd52739ee99a12436.jpg')
+        if SCP_035_webhook:
+            await SCP_035_webhook.send(new, username=f"{message.author.display_name}", avatar_url='https://i.pinimg.com/1200x/dd/bb/e8/ddbbe8338846172fd52739ee99a12436.jpg')
         else:
-            await safe_send(message, new)
+            await message.channel.send(new)
     if message.channel.id == COUNT_CHANNEL:
         role = message.guild.get_role(COUNT_ROLE)
         try:
@@ -946,8 +946,8 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_ready():
-    global webhook
-    webhook = discord.Webhook.from_url(os.getenv('SCP_WEBHOOK_URL'), session=aiohttp.ClientSession())
+    global SCP_035_webhook
+    SCP_035_webhook = discord.Webhook.from_url(os.getenv('SCP_WEBHOOK_URL'), session=aiohttp.ClientSession())
     try:
         await bot.tree.sync(guild=None)
     except Exception as e:

@@ -75,21 +75,16 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
     if content is None and not kwargs.get('embed') and not kwargs.get('file'):
         return None
     
-    # Определяем объект для отправки
-    send_target = None
-    
     # Проверяем, является ли destination Interaction
     if isinstance(destination, Interaction):
-        # Для Interaction используем response или followup
-        if not destination.response.is_done():
-            # Если ответ еще не отправлен
+        # ✅ Если явно указан is_followup или ответ уже отправлен
+        if kwargs.get('is_followup', False) or destination.response.is_done():
+            # Если есть is_followup - удаляем его из kwargs, чтобы не мешал
+            kwargs.pop('is_followup', None)
+            # Используем followup
             for attempt in range(max_retries):
                 try:
-                    if kwargs.get('ephemeral'):
-                        await destination.response.send_message(content, **kwargs)
-                    else:
-                        await destination.response.send_message(content, **kwargs)
-                    return True
+                    return await destination.followup.send(content, **kwargs)
                 except HTTPException as e:
                     if e.status == 429:
                         retry_after = float(e.response.headers.get('Retry-After', 1))
@@ -100,12 +95,11 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
                 except:
                     return None
         else:
-            if kwargs.get('ephemeral', False):
-                kwargs.pop('ephemeral', None)
-            # Если ответ уже отправлен, используем followup
+            # Если ответ еще не отправлен
             for attempt in range(max_retries):
                 try:
-                    return await destination.followup.send(content, **kwargs)
+                    await destination.response.send_message(content, **kwargs)
+                    return True
                 except HTTPException as e:
                     if e.status == 429:
                         retry_after = float(e.response.headers.get('Retry-After', 1))
@@ -121,10 +115,8 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
     if hasattr(destination, 'send'):
         send_target = destination
     elif hasattr(destination, 'channel') and hasattr(destination.channel, 'send'):
-        # Для контекста команд
         send_target = destination.channel
     elif hasattr(destination, 'message') and hasattr(destination.message, 'channel'):
-        # Для некоторых объектов
         send_target = destination.message.channel
     else:
         return None
@@ -133,7 +125,7 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
         try:
             return await send_target.send(content, **kwargs)
         except HTTPException as e:
-            if e.status == 429:  # Rate limit
+            if e.status == 429:
                 retry_after = float(e.response.headers.get('Retry-After', 1))
                 await asyncio.sleep(retry_after)
                 continue
@@ -784,7 +776,7 @@ async def rob(interaction: discord.Interaction, user: discord.User):
         )
         embed.add_field(
             name="бᴀᴧᴀнᴄ жᴇᴩᴛʙы",
-            value=f"**{int(robber_data['points']-new_points)}** <:physpoints:1515371982571704361>",
+            value=f"**{int(victim_data['points']-new_points)}** <:physpoints:1515371982571704361>",
             inline=True
         )
         embed.set_footer(text="ну и зᴧодᴇй жᴇ ʙы... <:werewolfsemoji:1517998966468378827>")
@@ -833,8 +825,8 @@ async def give(interaction: discord.Interaction, user: discord.User, points: int
     new_points = user_data["points"] + points
     await manager.update_user_economic(user.id, new_points, user_data["trees"], user_data["bugs"], user_data["animals"], user_data["werewolfs"],
     user_data["last_claim"], user_data["last_water"], user_data["last_collect"], user_data["last_fish"], user_data["last_bonus"], user_data["last_rob"])
-    await safe_send(interaction, f"Пользователю {user.mention} добавлено {points} <:physpoints:1515357132474679317>. Баланс: {new_points} <:physpoints:1515357132474679317>.")
-    await safe_send(channel, f"Пользователь {interaction.user.mention} использовал команду **/give** на игроке {user.mention} и дал {points} <:physpoints:1515357132474679317>")
+    await safe_send(interaction, f"Пользователю {user.mention} добавлено {points} <:physpoints:1515371982571704361>. Баланс: {new_points} <:physpoints:1515371982571704361>.")
+    await safe_send(channel, f"Пользователь {interaction.user.mention} использовал команду **/give** на игроке {user.mention} и дал {points} <:physpoints:1515371982571704361>")
 
 @bot.tree.command(name="забрать", description="Забрать награду у пользователя.")
 @app_commands.describe(user="Пользователь.", points="Кол-во награды.")
@@ -846,8 +838,8 @@ async def take(interaction: discord.Interaction, user: discord.User, points: int
     new_points = max(0, user_data["points"] - points)
     await manager.update_user_economic(user.id, new_points, user_data["trees"], user_data["bugs"], user_data["animals"], user_data["werewolfs"],
     user_data["last_claim"], user_data["last_water"], user_data["last_collect"], user_data["last_fish"], user_data["last_bonus"], user_data["last_rob"])
-    await safe_send(interaction, f"У пользователя {user.mention} забрано {points} <:physpoints:1515357132474679317>. Теперь: {new_points} <:physpoints:1515357132474679317>.")
-    await safe_send(channel, f"Пользователь {interaction.user.mention} использовал команду **/take** на игроке {user.mention} и забрал {points} <:physpoints:1515357132474679317>")
+    await safe_send(interaction, f"У пользователя {user.mention} забрано {points} <:physpoints:1515371982571704361>. Теперь: {new_points} <:physpoints:1515371982571704361>.")
+    await safe_send(channel, f"Пользователь {interaction.user.mention} использовал команду **/take** на игроке {user.mention} и забрал {points} <:physpoints:1515371982571704361>")
 
 @bot.event
 async def on_message(message):
