@@ -1907,22 +1907,21 @@ async def on_member_join(member):
 
 @bot.event
 async def on_message_delete(message):
-    await asyncio.sleep(1)
-    if message.author.bot or not message.content:
+    await asyncio.sleep(3)
+    if message.author.bot or not message.content or message.guild.me.id == message.author.id:
         return
+    deleted_by_bot = False
     try:
-        async for entry in message.guild.audit_logs(limit=5, action=discord.AuditLogAction.message_delete):
-            # Проверяем, что это удаление нашего сообщения
+        async for entry in message.guild.audit_logs(limit=10, action=discord.AuditLogAction.message_delete):
             if entry.target.id == message.author.id:
-                # Проверяем, кто удалил
                 deleter = entry.user
-                
-                # ✅ Если удалил ЛЮБОЙ бот - пропускаем
                 if deleter.bot:
-                    return
+                    deleted_by_bot = True
                 break
     except Exception as e:
         print(f"Ошибка аудит-лога: {e}")
+    if deleted_by_bot:
+        return
     log_channel = await safe_fetch_channel(bot, MOD_LOGS)
     if not log_channel:
         return

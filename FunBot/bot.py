@@ -3,12 +3,11 @@ from dotenv import load_dotenv
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timedelta, timezone
-from bs4 import BeautifulSoup
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from database.db_logic import DB_Manager
 from discord.errors import HTTPException, Forbidden, NotFound
-from discord import Interaction, Message 
+from discord import Interaction
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
@@ -214,7 +213,7 @@ class get_flower(discord.ui.View):
             await safe_send(interaction, f"😡 Цветы не для вас!", ephemeral=True)
             return
         button.disabled = True
-        await safe_edit(interaction, view=self)
+        await interaction.edit_original_response(view=self)
         await safe_send(interaction, f"🌹 {self.user.mention} дарит вам цветы!\n💌 С пожеланиями: {self.text}", ephemeral=True)
 
 # ========== ДЕКОРАТОР ==========
@@ -298,83 +297,6 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
         except:
             return None
     return None
-
-async def safe_edit(interaction_or_message, content=None, max_retries=3, **kwargs):
-    if content is None and not kwargs.get('embed') and not kwargs.get('view'):
-        return None
-    if isinstance(interaction_or_message, Interaction):
-        interaction = interaction_or_message
-        
-        for attempt in range(max_retries):
-            try:
-                # Проверяем, был ли уже ответ
-                if interaction.response.is_done():
-                    # Если ответ уже отправлен - используем edit_original_response
-                    await interaction.edit_original_response(content=content, **kwargs)
-                else:
-                    # Если ответа еще не было - отправляем новый
-                    await interaction.response.send_message(content=content, **kwargs)
-                return True
-                
-            except HTTPException as e:
-                if e.status == 429:  # Rate Limit
-                    retry_after = float(e.response.headers.get('Retry-After', 1))
-                    await asyncio.sleep(retry_after * (attempt + 1))
-                    continue
-                else:
-                    print(f"HTTP ошибка при редактировании Interaction: {e.status}")
-                    return False
-                    
-            except Forbidden:
-                print("Нет прав для редактирования Interaction")
-                return False
-                
-            except NotFound:
-                print("Interaction или сообщение не найдены")
-                return False
-                
-            except Exception as e:
-                print(f"Ошибка при редактировании Interaction: {e}")
-                return False
-        
-        print(f"Не удалось отредактировать Interaction после {max_retries} попыток")
-        return False
-    
-    # ====== РЕДАКТИРОВАНИЕ MESSAGE ======
-    elif isinstance(interaction_or_message, Message):
-        message = interaction_or_message
-        
-        for attempt in range(max_retries):
-            try:
-                return await message.edit(content=content, **kwargs)
-                
-            except HTTPException as e:
-                if e.status == 429:  # Rate Limit
-                    retry_after = float(e.response.headers.get('Retry-After', 1))
-                    await asyncio.sleep(retry_after * (attempt + 1))
-                    continue
-                else:
-                    print(f"HTTP ошибка при редактировании Message: {e.status}")
-                    return None
-                    
-            except Forbidden:
-                print("Нет прав для редактирования Message")
-                return None
-                
-            except NotFound:
-                print("Message не найдено")
-                return None
-                
-            except Exception as e:
-                print(f"Ошибка при редактировании Message: {e}")
-                return None
-        
-        print(f"Не удалось отредактировать Message после {max_retries} попыток")
-        return None
-    
-    else:
-        print("Ошибка: передан не Interaction и не Message")
-        return None
 
 async def safe_delete(message, delay=0, max_retries=3):
     if delay > 0:

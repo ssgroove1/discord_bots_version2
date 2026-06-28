@@ -40,10 +40,10 @@ class ClaimButton(Button):
     async def callback(self, interaction):
         await interaction.response.defer()
         if not chest['ready']:
-            return await safe_send(interaction, "<:accessdeniedemoji:1517986918573408318> Нет сундука", ephemeral=True)
+            return await safe_send(interaction, "<:accessdeniedemoji:1517986918573408318> Нет сундука", ephemeral=True, is_followup=True)
         if chest['claimed']:
-            return await safe_send(interaction, "<:accessdeniedemoji:1517986918573408318> Уже забрали!", ephemeral=True)
-        
+            return await safe_send(interaction, "<:accessdeniedemoji:1517986918573408318> Уже забрали!", ephemeral=True, is_followup=True)
+           
         chest['claimed'] = True
         chest['ready'] = False
         user_id = interaction.user.id
