@@ -35,7 +35,7 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
 class ClaimButton(Button):
     def __init__(self):
-        super().__init__(label="ᴛᴀᴋᴇ ᴀ ᴄᴏɴᴛᴀɪɴᴇʀ", style=discord.ButtonStyle.grey)
+        super().__init__(label="ᴛᴀᴋᴇ ᴀ ᴄᴏɴᴛᴀɪɴᴇʀ", style=discord.ButtonStyle.grey, timeout=None)
     
     async def callback(self, interaction):
         await interaction.response.defer()
@@ -77,7 +77,7 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
     
     # Проверяем, является ли destination Interaction
     if isinstance(destination, Interaction):
-        # ✅ Если явно указан is_followup или ответ уже отправлен
+        # Если явно указан is_followup или ответ уже отправлен
         if kwargs.get('is_followup', False) or destination.response.is_done():
             # Если есть is_followup - удаляем его из kwargs, чтобы не мешал
             kwargs.pop('is_followup', None)
@@ -247,7 +247,7 @@ async def sync(interaction: discord.Interaction):
         return
     bot.tree.clear_commands(guild=None)
     await bot.tree.sync(guild=None)
-    await safe_send(interaction, "✅ Команды синхронизированы для текущего сервера.", ephemeral=False)
+    await safe_send(interaction, "<:accessemoji:1518684370410541158> Команды синхронизированы для текущего сервера.", ephemeral=False)
 
 @bot.tree.command(name="работа", description="Забрать награду.")
 @app_commands.guild_only()
@@ -843,8 +843,10 @@ async def take(interaction: discord.Interaction, user: discord.User, points: int
 
 @bot.event
 async def on_message(message):
+    if not message.guild:
+        return
     if bot.user in message.mentions and message.author.id == DEVELOPER_ID:
-        await safe_send(message, f"{message.author.mention}, бот ещё жив! ✅")
+        await safe_send(message, f"{message.author.mention}, бот ещё жив! <:accessemoji:1518684370410541158>", delete_after=5)
 
 @give.error
 @take.error

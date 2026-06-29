@@ -43,7 +43,6 @@ LEVEL_ROLES = {
     10: 1512913425519345674,
 }
 trusted_bots = {1514273648364753016, 1513553810369417216, 1512556017492295851, 1515369279724195891, 302050872383242240, 575776004233232386, 315926021457051650}
-bot_deleted_messages = set()
 
 # Настройки бота
 intents = discord.Intents.default()
@@ -78,6 +77,9 @@ class AntiSpam:
         return self.spam_warnings[user_id]
     
     async def is_muted(self, member):
+        if not hasattr(member, 'guild'):
+            return False
+        
         muted_role = member.guild.get_role(MUTED_ROLE)
         if muted_role:
             return muted_role in member.roles
@@ -271,11 +273,12 @@ class TempVoice(commands.Cog):
                 name=f"╠ {member.display_name}'s 𝙘𝙝𝙖𝙣𝙣𝙚𝙡",
                 category=category,
                 reason=f"Создание временного канала для {member}")
-            await new_channel.set_permissions(member, 
-                connect=True, 
-                manage_channels=True,
-                move_members=True)
-            await new_channel.set_permissions(member.guild.default_role, connect=True, send_messages=True, attach_files=False, embed_links=False)
+            try:
+                await new_channel.set_permissions(member, connect=True, manage_channels=True, move_members=True)
+                await new_channel.set_permissions(member.guild.default_role, connect=True, send_messages=True, attach_files=False)
+            except discord.NotFound:
+                # Канал уже удалён
+                return
             await member.move_to(new_channel)
         # 2. Проверяем ВСЕ временные каналы на пустоту (включая те, откуда пользователь вышел)
         await self.check_empty_temp_channels(member.guild)
@@ -380,11 +383,11 @@ class WarningView(discord.ui.View):
 #         if view.value:
 #             try:
 #                 await self.target.ban(reason=f"Забанен {self.moderator.name}")
-#                 await interaction.edit_original_response(content=f"✅ {self.target.mention} был забанен!", view=None)
+#                 await interaction.edit_original_response(content=f"<:grantedemoji:1520173483299049623> {self.target.mention} был забанен!", view=None)
 #             except:
 #                 await interaction.edit_original_response(content="<:forbbiden2emoji:1517479332866429008> Не удалось забанить пользователя!", view=None)
 #         else:
-#             await interaction.edit_original_response(content="✅ Действие отменено", view=None)
+#             await interaction.edit_original_response(content="<:grantedemoji:1520173483299049623> Действие отменено", view=None)
 
 # class WarnModal(discord.ui.Modal):
 #     def __init__(self, target):
@@ -891,7 +894,7 @@ async def sync(interaction: discord.Interaction):
         return
     bot.tree.clear_commands(guild=None)
     await bot.tree.sync(guild=None)
-    await safe_send(interaction, "✅ Команды синхронизированы для текущего сервера.", ephemeral=False)
+    await safe_send(interaction, "<:grantedemoji:1520173483299049623> Команды синхронизированы для текущего сервера.", ephemeral=False)
 
 # ========== КОМАНДЫ МОДЕРАЦИИ ==========
 
@@ -920,8 +923,6 @@ async def clear_messages(interaction: discord.Interaction, amount: int = None):
     await safe_send(interaction, f"<:clearemoji:1515691240476377218> удᴀᴧᴇниᴇ {amount} ᴄообщᴇний...", ephemeral=True)
     try:
         deleted = await interaction.channel.purge(limit=amount)
-        for msg in deleted:
-            bot_deleted_messages.add(msg.id)
         await safe_edit(interaction, content=f"<:successemoji:1515691944460685372> удᴀᴧᴇно {len(deleted)} ᴄообщᴇний")
         if log_channel:
             try:
@@ -1697,6 +1698,8 @@ async def level_command(interaction: discord.Interaction, member: discord.Member
 
 @bot.event
 async def on_message(message):
+    if not message.guild:
+        return
     user_id = message.author.id
     # ПРОВЕРКА БОТОВ
     if message.author.bot:
@@ -1706,18 +1709,28 @@ async def on_message(message):
                 user_name = user.name
             else:
                 user_name = message.author.name
-            try:
-                await message.author.ban(reason=f"Неавторизованный бот (Автоматический бан)")
-            except discord.Forbidden:
-                print(f"❌ Нет прав для бана бота {user_name}")
-            except discord.HTTPException as e:
-                print(f"❌ Ошибка при бане бота: {e}")
-            except Exception as e:
-                print(f"❌ Неизвестная ошибка: {e}")
+            
+            # ✅ Получаем Member из гильдии
+            member = message.guild.get_member(user_id)
+            if member:
+                try:
+                    await member.ban(reason=f"Неавторизованный бот (Автоматический бан)")
+                except discord.Forbidden:
+                    print(f"❌ Нет прав для бана бота {user_name}")
+                except discord.HTTPException as e:
+                    print(f"❌ Ошибка при бане бота: {e}")
+                except Exception as e:
+                    print(f"❌ Неизвестная ошибка: {e}")
+            else:
+                # Если бот не на сервере - используем guild.ban()
+                try:
+                    await message.guild.ban(user, reason=f"Неавторизованный бот (Автоматический бан)")
+                except Exception as e:
+                    print(f"❌ Ошибка бана через guild.ban(): {e}")
         return
     # СОСТОЯНИЕ БОТОВ
     if bot.user in message.mentions and user_id == DEVELOPER_ID:
-        await safe_send(message, f"{message.author.mention}, бот ещё жив! ✅")
+        await safe_send(message, f"{message.author.mention}, бот ещё жив! <:grantedemoji:1520173483299049623>", delete_after=5)
     # +REP СИСТЕМА
     if message.content == "+rep":
         if message.mentions:
@@ -1802,15 +1815,15 @@ async def on_message(message):
         await safe_delete(message)
         warnings = anti_spam.add_spam_warning(user_id)
         if warnings == 1:
-            await safe_send(message.author, "<:warningemoji:1515756604178305054> **ᴨᴩᴇдуᴨᴩᴇждᴇниᴇ!** нᴇ ᴄᴨᴀʍьᴛᴇ ʙ чᴀᴛᴇ!\nᴄᴧᴇдующᴇᴇ нᴀᴩуɯᴇниᴇ - ʍуᴛ нᴀ 5 ʍинуᴛ.")
+            await safe_dm_send(message.author.id, "<:warningemoji:1515756604178305054> **ᴨᴩᴇдуᴨᴩᴇждᴇниᴇ!** нᴇ ᴄᴨᴀʍьᴛᴇ ʙ чᴀᴛᴇ!\nᴄᴧᴇдующᴇᴇ нᴀᴩуɯᴇниᴇ - ʍуᴛ нᴀ 5 ʍинуᴛ.")
             await safe_send(message.channel, f"<:warningemoji:1515756604178305054> {message.author.mention}, нᴇ ᴄᴨᴀʍьᴛᴇ ʙ чᴀᴛᴇ! ", delete_after=5)
         elif warnings == 2:
             await anti_spam.mute_user(message.author, 300)
-            await safe_send(message.author, "<:muteemoji:1515688038867538000> ʙы **зᴀдᴇᴩжᴀны** нᴀ 5 ʍинуᴛ зᴀ ᴄᴨᴀʍ!")
+            await safe_dm_send(message.author.id, "<:muteemoji:1515688038867538000> ʙы **зᴀдᴇᴩжᴀны** нᴀ 5 ʍинуᴛ зᴀ ᴄᴨᴀʍ!")
             await safe_send(message.channel, f"<:muteemoji:1515688038867538000> {message.author.mention} **зᴀдᴇᴩжᴀн** нᴀ 5 ʍинуᴛ зᴀ ᴄᴨᴀʍ!")
         elif warnings == 3:
             await anti_spam.mute_user(message.author, 1800)
-            await safe_send(message.author, "<:muteemoji:1515688038867538000> ʙы **зᴀдᴇᴩжᴀны** нᴀ 30 ʍинуᴛ зᴀ ᴨоʙᴛоᴩный ᴄᴨᴀʍ!")
+            await safe_dm_send(message.author.id, "<:muteemoji:1515688038867538000> ʙы **зᴀдᴇᴩжᴀны** нᴀ 30 ʍинуᴛ зᴀ ᴨоʙᴛоᴩный ᴄᴨᴀʍ!")
             await safe_send(message.channel, f"<:muteemoji:1515688038867538000> {message.author.mention} **зᴀдᴇᴩжᴀн** нᴀ 30 ʍинуᴛ зᴀ ᴨоʙᴛоᴩный ᴄᴨᴀʍ!")
         elif warnings == 4:
             await message.author.kick(reason="Спам после нескольких предупреждений")
@@ -1836,26 +1849,35 @@ async def on_member_remove(member):
 @bot.event
 async def on_member_join(member):
     if member.bot:
-        # ✅ Проверяем, разрешен ли этот бот
+    # ✅ Проверяем, разрешен ли этот бот
         trusted_set = getattr(bot, 'trusted_set', trusted_bots)
+        
+        # ✅ Защита от бана самого себя
+        if member.id == bot.user.id:
+            return
+        
         if member.id not in trusted_set:
-            user = await safe_fetch_user(bot, member.id)
-            if user:
-                user_name = user.name
-            else:
-                user_name = member.name
+            user_name = member.name
+            
+            # ✅ Отправляем сообщение в welcome канал
             welcome_channel = await safe_fetch_channel(bot, WELCOME_CHANNEL)
             if welcome_channel:
                 try:
                     await safe_send(welcome_channel, f"<:neutralizeemoji:1515694760990347325> ʙᴩᴀжᴇᴄᴋоᴇ уᴄᴛᴩойᴄᴛʙо, {member.mention}, **быᴧо нᴇйᴛᴩᴀᴧизоʙᴀно** ᴧучɯиʍи ᴄᴨᴇц-оᴛᴩядᴀʍи.")
                 except Exception as e:
                     print(f"❌ Ошибка отправки сообщения в канал: {e}")
+            
+            # ✅ Баним через Member (работает!)
             try:
                 await member.ban(reason="Неавторизованный бот (Автоматическая нейтрализация)")
+                    
             except discord.Forbidden:
                 print(f"❌ Нет прав для бана бота {user_name}")
-            except Exception as e:
+            except discord.HTTPException as e:
                 print(f"❌ Ошибка при бане бота {user_name}: {e}")
+            except Exception as e:
+                print(f"❌ Неизвестная ошибка при бане бота {user_name}: {e}")
+            
             return
     try:
         roles_to_restore = await manager.get_user_roles_ruler(member.id)
@@ -1909,17 +1931,8 @@ async def on_member_join(member):
 
 @bot.event
 async def on_message_delete(message):
-    if message.id in bot_deleted_messages:
-        bot_deleted_messages.remove(message.id)
+    if not message.guild:
         return
-    try:
-        async for entry in message.guild.audit_logs(limit=5, action=discord.AuditLogAction.message_delete):
-            if entry.target.id == message.author.id:
-                if entry.user.bot:
-                    return
-                break
-    except:
-        pass
     if message.author.bot or not message.content or message.guild.me.id == message.author.id:
         return
     log_channel = await safe_fetch_channel(bot, MOD_LOGS)
