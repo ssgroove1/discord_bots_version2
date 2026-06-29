@@ -35,7 +35,7 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
 class ClaimButton(Button):
     def __init__(self):
-        super().__init__(label="ᴛᴀᴋᴇ ᴀ ᴄᴏɴᴛᴀɪɴᴇʀ", style=discord.ButtonStyle.grey, timeout=None)
+        super().__init__(label="ᴛᴀᴋᴇ ᴀ ᴄᴏɴᴛᴀɪɴᴇʀ", style=discord.ButtonStyle.grey)
     
     async def callback(self, interaction):
         await interaction.response.defer()
@@ -217,7 +217,7 @@ async def event_loop():
         if time.time() - chest['time'] > 28800 and not chest['ready']:
             chest.update({'ready': True, 'claimed': False, 'reward': random.randint(8, 27), 'time': time.time()})
             
-            view = View()
+            view = View(timeout=None)
             view.add_item(ClaimButton())
             
             channel = bot.get_channel(COMMANDS_CHANNEL)
