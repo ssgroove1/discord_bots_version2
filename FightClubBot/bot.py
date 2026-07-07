@@ -109,7 +109,7 @@ anti_spam = AntiSpam()
 class CloseTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label=discord.ui.Label("зᴀᴋᴩыᴛь ᴛиᴋᴇᴛ"), style=discord.ButtonStyle.danger, custom_id="close_channel_btn")
+    @discord.ui.button(label="зᴀᴋᴩыᴛь ᴛиᴋᴇᴛ", style=discord.ButtonStyle.danger)
     async def close_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
         is_support = any(r.id in SUPPORT_ROLES or r.name in SUPPORT_ROLES for r in interaction.user.roles)
         if not interaction.user.guild_permissions.administrator and not is_support:
@@ -218,7 +218,7 @@ class DynamicUserView(discord.ui.View):
         super().__init__(timeout=None)
         self.open_ticket_btn.custom_id = custom_id
 
-    @discord.ui.button(label=discord.ui.Label("оᴛᴋᴩыᴛь ᴛиᴋᴇᴛ"), style=discord.ButtonStyle.green)
+    @discord.ui.button(label="оᴛᴋᴩыᴛь ᴛиᴋᴇᴛ", style=discord.ButtonStyle.green)
     async def open_ticket_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = PANEL_CONFIGS.get(button.custom_id)
         if not fields:
