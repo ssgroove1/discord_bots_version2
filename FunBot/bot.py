@@ -213,8 +213,20 @@ class get_flower(discord.ui.View):
             await safe_send(interaction, f"😡 Цветы не для вас!", ephemeral=True)
             return
         button.disabled = True
-        await safe_edit(interaction, view=self)
+        try:
+            await interaction.response.edit_message(view=self)
+        except:
+            await interaction.edit_original_response(view=self)
         await safe_send(interaction, f"🌹 {self.user.mention} дарит вам цветы!\n💌 С пожеланиями: {self.text}", ephemeral=True)
+    
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except:
+                pass
 
 # --- КНОПКА ПОЖЕНИТЬСЯ ---
 class MarriageView(discord.ui.View):
