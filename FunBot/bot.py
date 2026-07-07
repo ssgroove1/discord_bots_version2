@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from database.db_logic import DB_Manager
 from discord.errors import HTTPException, Forbidden, NotFound
-from discord import Interaction
+from discord import Interaction, Message
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
@@ -31,11 +31,11 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 # ========== КЛАССЫ КНОПОК ==========
 
 RADIO_CONFIG = {
-    "public": {"name": "общий", "emoji": "<:radioemoji:1519767792193110086>", "range": 100},
-    "emergency": {"name": "϶ᴋᴄᴛᴩᴇнный", "emoji": "<:emergencyemoji:1519769135767228576>", "range": 50},
-    "umbrella": {"name": "ᴜᴍʙʀᴇʟʟᴀ", "emoji": "<:umbrellaemoji:1516757365800833146>", "range": 30},
-    "stars": {"name": "s.ᴛ.ᴀ.ʀ.s.", "emoji": "<:starsemoji:1519768273925705749>", "range": 75},
-    "bsaa": {"name": "ʙsᴀᴀ", "emoji": "<:soldieremoji:1516779793624993843>", "range": 80}
+    "public": {"name": "общий", "emoji": "📻", "range": 100},
+    "emergency": {"name": "϶ᴋᴄᴛᴩᴇнный", "emoji": "🚨", "range": 50},
+    "umbrella": {"name": "ᴜᴍʙʀᴇʟʟᴀ", "emoji": "🩸", "range": 30},
+    "stars": {"name": "s.ᴛ.ᴀ.ʀ.s.", "emoji": "🌟", "range": 75},
+    "bsaa": {"name": "ʙsᴀᴀ", "emoji": "🧪", "range": 80}
 }
 RADIO_SOUNDS = ["պⲉⲗɥⲟⲕ.", "ⲏⲁⲥⲧⲣⲟύⲕⲁ.", "ⲥυⲅⲏⲁⲗ ⲡⲣυⲏяⲧ.", "ⲡⲉⲣⲉⲇⲁю...", "ⲡⲣυⲉⲙ..."]
 RADIO_NOISES = ["шшш...", "треск...", "шум ветра...", "помехи...", "потеря сигнала..."]
@@ -203,27 +203,165 @@ class get_flower(discord.ui.View):
         self.user = user
         self.target = target
         self.text = text
-        self.is_claimed = False
     
     @discord.ui.button(label="ᴨоᴧучиᴛь цʙᴇᴛы", style=discord.ButtonStyle.primary, emoji="💐")
     async def get_flower_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-
         if interaction.user == self.user:
             await safe_send(interaction, f"🤗 Вы не можете отменить действие!", ephemeral=True)
             return
         elif interaction.user != self.target:
             await safe_send(interaction, f"😡 Цветы не для вас!", ephemeral=True)
             return
-        self.is_claimed = True
         button.disabled = True
+        await safe_edit(interaction, view=self)
+        await safe_send(interaction, f"🌹 {self.user.mention} дарит вам цветы!\n💌 С пожеланиями: {self.text}", ephemeral=True)
+
+# --- КНОПКА ПОЖЕНИТЬСЯ ---
+class MarriageView(discord.ui.View):
+    def __init__(self, proposer_id: int, target_id: int):
+        super().__init__(timeout=300)
+        self.proposer_id = proposer_id
+        self.target_id = target_id
+        self.message = None
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.target_id:
+            await safe_send(interaction, "<:deniedemoji:1519737463126360294> Это предложение не для вас!", ephemeral=True)
+            return False
+        return True
+    
+    @discord.ui.button(label="💍 Принять", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if manager.is_married(self.proposer_id):
+            await safe_send(interaction, "<:deniedemoji:1519737463126360294> Вы уже состоите в браке!", ephemeral=True)
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            return
+        
+        if manager.is_married(self.target_id):
+            await safe_send(interaction, "<:deniedemoji:1519737463126360294> Этот пользователь уже в браке!", ephemeral=True)
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            return
+
+        result = manager.create_marriage_funbot(self.proposer_id, self.target_id)
+        
+        for child in self.children:
+            child.disabled = True
         try:
+            await interaction.response.edit_message(view=self)
+        except:
             await interaction.edit_original_response(view=self)
-        except discord.NotFound:
-            pass
-        await interaction.followup.send(
-            f"🌹 {self.user.mention} дарит вам цветы!\n💌 С пожеланиями: {self.text}",
-            ephemeral=True)
+        
+        if "✅" in result:
+            embed = discord.Embed(
+                title="<:ringemoji:1523657901569212426> бᴩᴀᴋ зᴀᴋᴧючᴇн!",
+                description=f"<@{self.proposer_id}> и <@{self.target_id}> ᴛᴇᴨᴇᴩь ʍуж и жᴇнᴀ! <:giveawayemoji:1515792000279121930>",
+                color=discord.Color.pink(),
+                timestamp=discord.utils.utcnow()
+            )
+            await safe_send(interaction, embed=embed,
+            )
+        else:
+            await safe_send(interaction,
+                content=f"<:deniedemoji:1519737463126360294> {result}",
+            )
+    
+    @discord.ui.button(label="❌ Отказать", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except:
+            await interaction.edit_original_response(view=self)
+        
+        await safe_send(interaction,
+            content=f"<:deniedemoji:1519737463126360294> <@{self.target_id}> оᴛᴋᴀзᴀᴧ(ᴀ) ʙ бᴩᴀᴋᴇ.",
+        )
+        
+    
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except:
+                pass
+
+# Создаем кнопку подтверждения развода
+class DivorceView(discord.ui.View):
+    def __init__(self, user_id: int, spouse_id: int):
+        super().__init__(timeout=30)
+        self.user_id = user_id
+        self.spouse_id = spouse_id
+        self.message = None
+    
+    @discord.ui.button(label="💔 Подтвердить развод", style=discord.ButtonStyle.danger)
+    async def confirm_divorce(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await safe_send(interaction, "<:deniedemoji:1519737463126360294> Это не ваш развод!", ephemeral=True)
+            return
+        
+        # Расторгаем брак
+        success, message = manager.divorce_simple(self.user_id)
+        
+        # Отключаем кнопки
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except:
+            await interaction.edit_original_response(view=self)
+        
+        if success:
+            embed = discord.Embed(
+                title="<:brokenheartemoji:1523753728375656588> бᴩᴀᴋ ᴩᴀᴄᴛоᴩᴦнуᴛ",
+                description=f"<@{self.user_id}> ᴩᴀзʙᴇᴧᴄя(ᴀᴄь) ᴄ <@{self.spouse_id}>.",
+                color=discord.Color.red(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.set_image(url='https://i.pinimg.com/originals/5c/3f/d0/5c3fd04b1e985a8bddd87ae3c7e58827.gif')
+            await safe_send(interaction, embed=embed, ephemeral=False)
+            
+            # Уведомляем супруга
+            try:
+                spouse = await bot.fetch_user(self.spouse_id)
+                await interaction.channel.send(
+                    f"{spouse.mention}, ваш брак был расторгнут. <:brokenheartemoji:1523753728375656588>")
+            except:
+                pass
+        else:
+            await safe_send(interaction, 
+                content=f"<:deniedemoji:1519737463126360294> {message}",
+                ephemeral=True)
+    
+    @discord.ui.button(label="❌ Отмена", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await safe_send(interaction, "<:deniedemoji:1519737463126360294> Это не ваш развод!", ephemeral=True)
+            return
+        
+        for child in self.children:
+            child.disabled = True
+        
+        await safe_edit(interaction,
+            content="<:heartemoji:1516740800518557696> ᴩᴀзʙод оᴛʍᴇнᴇн.", view=self)
+    
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        # ✅ Проверяем, что self.message - это Message, а не bool
+        if self.message and isinstance(self.message, discord.Message):
+            try:
+                await self.message.edit(view=self)
+            except Exception as e:
+                print(f"⚠️ Ошибка при обновлении сообщения по таймауту: {e}")
+        else:
+            print("ℹ️ Нет сообщения для обновления или это не Message объект")
 
 # ========== ДЕКОРАТОР ==========
 
@@ -307,6 +445,37 @@ async def safe_send(destination, content=None, max_retries=3, **kwargs):
             return None
     return None
 
+async def send_with_view(interaction, embed, view, content=None, ephemeral=False):
+    try:
+        if interaction.response.is_done():
+            # Если уже отвечали - используем followup
+            message = await interaction.followup.send(
+                content=content,
+                embed=embed,
+                view=view,
+                ephemeral=ephemeral
+            )
+        else:
+            # Отправляем новый ответ
+            await interaction.response.send_message(
+                content=content,
+                embed=embed,
+                view=view,
+                ephemeral=ephemeral
+            )
+            message = await interaction.original_response()
+        
+        # ✅ Сохраняем сообщение в view
+        if isinstance(message, discord.Message):
+            view.message = message
+        else:
+            print(f"⚠️ Получен не-Message объект: {type(message)}")
+        
+        return message
+    except Exception as e:
+        print(f"❌ Ошибка при отправке: {e}")
+        return None
+
 async def safe_delete(message, delay=0, max_retries=3):
     if delay > 0:
         await asyncio.sleep(delay)
@@ -331,6 +500,83 @@ async def safe_delete(message, delay=0, max_retries=3):
         except:
             return False
     return False
+
+async def safe_edit(interaction_or_message, content=None, max_retries=3, **kwargs):
+    if content is None and not kwargs.get('embed') and not kwargs.get('view'):
+        return None
+    if isinstance(interaction_or_message, Interaction):
+        interaction = interaction_or_message
+        
+        for attempt in range(max_retries):
+            try:
+                # Проверяем, был ли уже ответ
+                if interaction.response.is_done():
+                    # Если ответ уже отправлен - используем edit_original_response
+                    await interaction.edit_original_response(content=content, **kwargs)
+                else:
+                    # Если ответа еще не было - отправляем новый
+                    await interaction.response.send_message(content=content, **kwargs)
+                return True
+                
+            except HTTPException as e:
+                if e.status == 429:  # Rate Limit
+                    retry_after = float(e.response.headers.get('Retry-After', 1))
+                    await asyncio.sleep(retry_after * (attempt + 1))
+                    continue
+                else:
+                    print(f"HTTP ошибка при редактировании Interaction: {e.status}")
+                    return False
+                    
+            except Forbidden:
+                print("Нет прав для редактирования Interaction")
+                return False
+                
+            except NotFound:
+                print("Interaction или сообщение не найдены")
+                return False
+                
+            except Exception as e:
+                print(f"Ошибка при редактировании Interaction: {e}")
+                return False
+        
+        print(f"Не удалось отредактировать Interaction после {max_retries} попыток")
+        return False
+    
+    # ====== РЕДАКТИРОВАНИЕ MESSAGE ======
+    elif isinstance(interaction_or_message, Message):
+        message = interaction_or_message
+        
+        for attempt in range(max_retries):
+            try:
+                return await message.edit(content=content, **kwargs)
+                
+            except HTTPException as e:
+                if e.status == 429:  # Rate Limit
+                    retry_after = float(e.response.headers.get('Retry-After', 1))
+                    await asyncio.sleep(retry_after * (attempt + 1))
+                    continue
+                else:
+                    print(f"HTTP ошибка при редактировании Message: {e.status}")
+                    return None
+                    
+            except Forbidden:
+                print("Нет прав для редактирования Message")
+                return None
+                
+            except NotFound:
+                print("Message не найдено")
+                return None
+                
+            except Exception as e:
+                print(f"Ошибка при редактировании Message: {e}")
+                return None
+        
+        print(f"Не удалось отредактировать Message после {max_retries} попыток")
+        return None
+    
+    else:
+        print("Ошибка: передан не Interaction и не Message")
+        return None
 
 # ========== НЕКОТОРЫЙ РЕФЕРЕНС ==========
 
@@ -511,15 +757,15 @@ async def pat_command(interaction: discord.Interaction, member: discord.Member):
         "😥 Простите, вы не можете погладить себя!"
     )(interaction, member)
 
-@bot.tree.command(name='поздароваться', description='Поздоровайтесь с пользователем!')
+@bot.tree.command(name='поздароваться', description='Поздаровайтесь с пользователем!')
 @app_commands.guild_only()
 async def hello_command(interaction: discord.Interaction, member: discord.Member):
     await make_interaction_command(
         hello_gifs,
         "🤗 Приветствие!",
-        "поздоровался с",
+        "поздаровался с",
         discord.Color.gold(),
-        "😥 Простите, вы не можете поздороваться с собой!"
+        "😥 Простите, вы не можете поздароваться с собой!"
     )(interaction, member)
 
 @bot.tree.command(name='ударить', description='Дать леща пользователю!')
@@ -583,6 +829,154 @@ async def gift_user(interaction: discord.Interaction, member: discord.Member, te
     )
     embed.set_image(url=random_gif)
     await safe_send(interaction, embed=embed, view=view, ephemeral=False)
+
+@bot.tree.command(name="мой_брак", description="Показать информацию о вашем браке.")
+@app_commands.describe(user="Пользователь, информацию о браке которого вы хотите узнать.")
+async def marriage_info(interaction: discord.Interaction, user: discord.Member = None):
+    if user is None:
+        user = interaction.user
+    if not manager.is_married(user.id):
+        if user.id == interaction.user.id:
+            await safe_send(interaction, "<:deniedemoji:1519737463126360294> Вы не состоите в браке.", ephemeral=True)
+        else:
+            await safe_send(interaction, f"<:deniedemoji:1519737463126360294> {user.mention} не состоит в браке.", ephemeral=True)
+        return
+    spouse_id = manager.get_spouse(user.id)
+    if spouse_id is None:
+        await safe_send(interaction, "<:deniedemoji:1519737463126360294> Не удалось найти данные о браке.", ephemeral=True)
+        return
+    marriage_data = manager.get_information_marry(user.id)
+    if marriage_data is None:
+        await safe_send(interaction, "<:deniedemoji:1519737463126360294> Не удалось найти данные о браке.", ephemeral=True)
+        return
+    try:
+        spouse = await bot.fetch_user(spouse_id)
+        spouse_name = spouse.mention
+        spouse_avatar = spouse.display_avatar.url if spouse.display_avatar else None
+    except:
+        spouse_name = f"<@{spouse_id}>"
+        spouse_avatar = None
+    created_at = marriage_data['created_at']
+    created_dt = discord.utils.format_dt(
+        datetime.fromtimestamp(created_at, tz=timezone.utc), 
+        'f')
+    relative_dt = discord.utils.format_dt(
+        datetime.fromtimestamp(created_at, tz=timezone.utc),
+        'R')
+    
+    # Вычисляем длительность брака
+    days = int((time.time() - created_at) // 86400)
+    hours = int(((time.time() - created_at) % 86400) // 3600)
+    minutes = int(((time.time() - created_at) % 3600) // 60)
+    
+    if days > 0:
+        duration = f"{days} дн. {hours} ч. {minutes} мин."
+    elif hours > 0:
+        duration = f"{hours} ч. {minutes} мин."
+    else:
+        duration = f"{minutes} мин."
+
+    embed = discord.Embed(
+        title="<:ringemoji:1523657901569212426> инɸоᴩʍᴀция о бᴩᴀᴋᴇ",
+        color=discord.Color.pink(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(
+        name="<:smilefaceemoji:1524123343370977448> ᴄуᴨᴩуᴦ(ᴀ)",
+        value=f"{spouse_name}",
+        inline=False
+    )
+    embed.add_field(
+        name="<:starsemoji:1519768273925705749> дᴀᴛᴀ зᴀᴋᴧючᴇния",
+        value=f"{created_dt}\n({relative_dt})",
+        inline=False
+    )
+    embed.add_field(
+        name="<:timeemoji:1524124492236980316> дᴧиᴛᴇᴧьноᴄᴛь",
+        value=f"`{duration}`",
+        inline=True
+    )
+    if spouse_avatar:
+        embed.set_thumbnail(url=spouse_avatar)
+    
+    embed.set_footer(
+        text=f"Запросил: {interaction.user.display_name}",
+        icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
+    await safe_send(interaction, embed=embed, ephemeral=False)
+
+@bot.tree.command(name="заключить_брак", description="Предложить брак пользователю.")
+@app_commands.describe(user="Пользователь, которому вы предлагаете брак")
+async def propose_marriage(interaction: discord.Interaction, user: discord.Member):
+    if user.id == interaction.user.id:
+        await safe_send(interaction, "<:deniedemoji:1519737463126360294> Нельзя жениться на самом себе!", ephemeral=True)
+        return
+    if user.bot:
+        await safe_send(interaction, "🤖 Нельзя жениться на боте!", ephemeral=True)
+        return
+    if manager.is_married(interaction.user.id):
+        await safe_send(interaction, "<:deniedemoji:1519737463126360294> Вы уже состоите в браке!", ephemeral=True)
+        return
+    if manager.is_married(user.id):
+        await safe_send(interaction, f"<:deniedemoji:1519737463126360294> {user.mention} уже состоит в браке!", ephemeral=True)
+        return
+    
+    view = MarriageView(interaction.user.id, user.id)
+    
+    embed = discord.Embed(
+        title="<:ringemoji:1523657901569212426> ᴨᴩᴇдᴧожᴇниᴇ бᴩᴀᴋᴀ",
+        description=f"{interaction.user.mention} ᴨᴩᴇдᴧᴀᴦᴀᴇᴛ бᴩᴀᴋ {user.mention}!",
+        color=discord.Color.pink(),
+        timestamp=discord.utils.utcnow())
+    embed.add_field(
+        name="<:clockemoji:1523658304281116672> ʙᴩᴇʍя нᴀ оᴛʙᴇᴛ",
+        value="300 ᴄᴇᴋунд",
+        inline=True)
+    embed.set_image(url='https://i.pinimg.com/originals/f9/ab/3f/f9ab3f93ea21d12d5a0363262a4b8802.gif')
+    embed.set_footer(text="Нажмите кнопку для ответа")
+    
+    await send_with_view(interaction, 
+        content=f"{user.mention}, у ʙᴀᴄ ᴇᴄᴛь ᴨᴩᴇдᴧожᴇниᴇ!",
+        embed=embed,
+        view=view)
+
+@bot.tree.command(name="развод", description="Расторгнуть брак.")
+async def divorce_command(interaction: discord.Interaction):
+    if not manager.is_married(interaction.user.id):
+        await safe_send(interaction, "<:deniedemoji:1519737463126360294> Вы не состоите в браке!", ephemeral=True)
+        return
+    
+    spouse_id = manager.get_spouse(interaction.user.id)
+    if spouse_id is None:
+        await safe_send(interaction, "<:deniedemoji:1519737463126360294> Не удалось найти данные о браке.", ephemeral=True)
+        return
+    
+    try:
+        spouse = await bot.fetch_user(spouse_id)
+        spouse_name = spouse.mention
+    except:
+        spouse_name = f"<@{spouse_id}>"
+    
+    view = DivorceView(interaction.user.id, spouse_id)
+    
+    embed = discord.Embed(
+        title="<:brokenheartemoji:1523753728375656588> ᴨодᴛʙᴇᴩждᴇниᴇ ᴩᴀзʙодᴀ",
+        description=f"ʙы уʙᴇᴩᴇны, чᴛо хоᴛиᴛᴇ ᴩᴀзʙᴇᴄᴛиᴄь ᴄ {spouse_name}?",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(
+        name="<:cautionemoji:1520064481357598770> ʙниʍᴀниᴇ",
+        value="϶ᴛо дᴇйᴄᴛʙиᴇ нᴇᴧьзя оᴛʍᴇниᴛь!",
+        inline=False
+    )
+    embed.add_field(
+        name="<:clockemoji:1523658304281116672> ʙᴩᴇʍя нᴀ оᴛʙᴇᴛ",
+        value="30 ᴄᴇᴋунд",
+        inline=True)
+    embed.set_image(url='https://i.pinimg.com/originals/81/cc/04/81cc045c3e66f8b54c71a2a85a64cc9d.gif')
+    embed.set_footer(text="Нажмите кнопку для подверждение")
+    
+    await send_with_view(interaction, embed=embed, view=view, ephemeral=False)
 
 @bot.tree.command(name="надеть_маску", description="Надеть маску")
 @app_commands.guild_only()
@@ -865,8 +1259,10 @@ async def on_message(message):
             user_number = int(message.content.strip())
             if user_number != next_number_in_count_channel:
                 raise ValueError("Не по порядку")
+            elif user_number % 250 == 0:
+                await safe_send(message, f"**ⲡⲟⲗьⳅⲟⲃⲁⲧⲉⲗυ, ⲕⲁⲕ ⲿⲉ я ⲃⲁⲙυ ⲅⲟⲣⲿⲩⲥь! <a:animegirl:1523642604124897340>**\nᴋᴀждый ʙᴀɯ ɯᴀᴦ дᴇᴧᴀᴇᴛ ʍᴇня ᴩᴀдоᴄᴛнᴇᴇ! ᴛᴇᴋущᴇᴇ чиᴄᴧо — {user_number}, нᴇ оᴄᴛᴀнᴀʙᴧиʙᴀйᴛᴇᴄь и нᴇ ᴄдᴀʙᴀйᴛᴇᴄь! <a:akirakogami:1523644045832880218>")
             elif user_number % 100 == 0:
-                await safe_send(message, f"**ⲡⲟⲗьⳅⲟⲃⲁⲧⲉⲗυ, ⲃы ⲇⲟⲥⲧυⲅⲁⲉⲧⲉ ⲃⲉⲣɯυⲏ! ⲅⲟⲣⲿⲩⲥь ⲃⲁⲙυ! <a:yuik:1514940189988880507>**\nʙы ᴨᴩᴇодоᴧᴇʙᴀᴇᴛᴇ оᴛʍᴇᴛᴋу ʙ {user_number}, нᴇ ᴄдᴀʙᴀйᴛᴇᴄь! <a:oshimai:1514940166626742382>")
+                await safe_send(message, f"**ⲡⲟⲗьⳅⲟⲃⲁⲧⲉⲗυ, ⲃы ⲇⲟⲥⲧυⲅⲁⲉⲧⲉ ⲃⲉⲣɯυⲏ! ⲅⲟⲣⲿⲩⲥь ⲃⲁⲙυ! <a:yuik:1514940189988880507>**\nʙы ᴨᴩᴇодоᴧᴇʙᴀᴇᴛᴇ оᴛʍᴇᴛᴋу ʙ {user_number}, нᴇ оᴨуᴄᴋᴀйᴛᴇ ᴩуᴋи нᴀ доᴄᴛиᴦнуᴛоʍ! <a:oshimai:1514940166626742382>")
             elif user_number % 50 == 0:
                 await safe_send(message, f"**ⲡⲟⲗьⳅⲟⲃⲁⲧⲉⲗυ, ⲡⲟⳅⲇⲣⲁⲃⲗяю! <a:makise:1514939694624800818>**\nʙы доɯᴧи до {user_number}, ᴨᴩодоᴧжᴀйᴛᴇ ʙ ᴛоʍ жᴇ духᴇ! <a:oshimai:1514940166626742382>")
             next_number_in_count_channel += 1

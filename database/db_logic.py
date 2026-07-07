@@ -1,4 +1,4 @@
-import sqlite3
+import sqlite3, time
 
 class DB_Manager:
     def __init__(self, database):
@@ -41,8 +41,7 @@ class DB_Manager:
                                 last_collect REAL DEFAULT 0,
                                 last_fish REAL DEFAULT 0,
                                 last_bonus REAL DEFAULT 0,
-                                last_rob REAL DEFAULT 0)''') 
-            
+                                last_rob REAL DEFAULT 0)''')
             # The Fun Bot
             conn.execute('''CREATE TABLE IF NOT EXISTS user_fun_time (
                                 user_id INTEGER PRIMARY KEY,
@@ -58,7 +57,7 @@ class DB_Manager:
             conn.execute('''CREATE TABLE IF NOT EXISTS user_marriages (
                                 first_user_id INTEGER,
                                 second_user_id INTEGER,
-                                created at REAL DEFAULT 0
+                                created_at REAL DEFAULT 0
                         )''')
             conn.commit()
     # The Ruler
@@ -188,6 +187,98 @@ class DB_Manager:
         """, (current_aura, count_herb, last_time_herb, user_id))
         conn.commit()
         conn.close()
+
+    # marriages
+    def create_marriage_funbot(self, first_user_id: int, second_user_id: int) -> str:
+        if first_user_id == second_user_id:
+            return "❌ Нельзя жениться на самом себе!"
+        conn = sqlite3.connect(self.database, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        cursor = conn.cursor()
+        
+        # Проверяем первого
+        cursor.execute("""
+            SELECT first_user_id, second_user_id 
+            FROM user_marriages 
+            WHERE first_user_id = ? OR second_user_id = ?
+        """, (first_user_id, first_user_id))
+        if cursor.fetchone():
+            return "❌ Вы уже состоите в браке!"
+        
+        # Проверяем второго
+        cursor.execute("""
+            SELECT first_user_id, second_user_id 
+            FROM user_marriages 
+            WHERE first_user_id = ? OR second_user_id = ?
+        """, (second_user_id, second_user_id))
+        if cursor.fetchone():
+            return "❌ Этот пользователь уже состоит в браке!"
+
+        try:
+            cursor.execute("""
+                INSERT INTO user_marriages (first_user_id, second_user_id, created_at)
+                VALUES (?, ?, ?)
+            """, (first_user_id, second_user_id, time.time()))
+            conn.commit()
+            return "✅ Брак успешно заключен! 💍"
+        except Exception as e:
+            return f"❌ Ошибка: {e}"
+    
+    def is_married(self, user_id: int) -> bool:
+        conn = sqlite3.connect(self.database, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT first_user_id, second_user_id 
+            FROM user_marriages 
+            WHERE first_user_id = ? OR second_user_id = ?
+        """, (user_id, user_id))
+        return cursor.fetchone() is not None
+    
+    def get_spouse(self, user_id: int):
+        conn = sqlite3.connect(self.database, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT first_user_id, second_user_id 
+            FROM user_marriages 
+            WHERE first_user_id = ? OR second_user_id = ?
+        """, (user_id, user_id))
+        row = cursor.fetchone()
+        if row:
+            return row[1] if row[0] == user_id else row[0]
+        return None
+    
+    def get_information_marry(self, user_id: int):
+        conn = sqlite3.connect(self.database, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT first_user_id, second_user_id, created_at 
+            FROM user_marriages 
+            WHERE first_user_id = ? OR second_user_id = ?
+        """, (user_id, user_id))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def divorce_simple(self, user_id: int):
+        try:
+            conn = sqlite3.connect(self.database, timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM user_marriages 
+                WHERE first_user_id = ? OR second_user_id = ?
+            """, (user_id, user_id))
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                return True, "Брак расторгнут. 💔"
+            return False, "Не удалось расторгнуть брак."
+        except Exception as e:
+            return False, f"Ошибка при разводе: {e}"
 
     # The Economic
     async def get_user_economic(self, user_id):

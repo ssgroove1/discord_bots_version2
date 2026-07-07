@@ -16,7 +16,7 @@ PREFIX = os.getenv('COMMAND_PREFIX')
 COMMANDS_CHANNEL, MOD_COMMANDS_CHANNEL, MOD_LOGS_COMMANDS = int(os.getenv('COMMANDS_CHANNEL_ID')), int(os.getenv('MOD_COMMANDS_CHANNEL_ID')), int(os.getenv('MOD_LOGS_CHANNEL_ID2'))
 GUILD_ID, DEVELOPER_ID = int(os.getenv('GUILD_ID')), int(os.getenv('DEVELOPER_ID'))
 TREE_COST = 10  
-ANIMAL_COST = 20     
+ANIMAL_COST = 25     
 MAX_TREES, MAX_ANIMALS = 10, 10
 roles_shop = {   
     "𝘼𝙧𝙘𝙝𝙞𝙫𝙞𝙨𝙩": {'role_id': 1515397238447411362, 'cost': 50}, 
@@ -215,7 +215,7 @@ async def safe_edit(interaction_or_message, content=None, max_retries=3, **kwarg
 async def event_loop():
     while True:
         if time.time() - chest['time'] > 28800 and not chest['ready']:
-            chest.update({'ready': True, 'claimed': False, 'reward': random.randint(8, 27), 'time': time.time()})
+            chest.update({'ready': True, 'claimed': False, 'reward': random.randint(35, 53), 'time': time.time()})
             
             view = View(timeout=None)
             view.add_item(ClaimButton())
@@ -267,7 +267,7 @@ async def claim(interaction: discord.Interaction):
         minutes = (seconds_left % 3600) // 60
         await safe_send(interaction, f"**<:accessdeniedemoji:1517986918573408318> {interaction.user.mention}, вы уже забирали награду!**\n⌛ Осталось: **{hours} ч. {minutes} мин.**", ephemeral=True)
         return
-    reward = random.randint(3, 10)
+    reward = random.randint(6, 14)
     new_points = user_data["points"] + reward
 
     await manager.update_user_economic(user_id, new_points, user_data["trees"], user_data["bugs"], user_data["animals"], user_data["werewolfs"], current_time, user_data["last_water"], user_data["last_collect"], user_data["last_fish"], user_data["last_bonus"], user_data["last_rob"])
@@ -295,24 +295,24 @@ async def fish(interaction: discord.Interaction):
     fish_text = ""
     if chance < 0.01:
         fish_text = "ⲏⲁⲥⲧⲟяպⲉⲅⲟ ⲙⲉⲅⲁⲗⲁⲇⲟⲏⲁ! <:megaladonemoji:1518011720499593246>"
-        reward = 37
+        reward = random.randint(124, 157)
         role = interaction.guild.get_role(1518011868709388339)
         if role:
             await interaction.user.add_roles(role, reason=f"Выловил улов!")
             await safe_send(interaction, "<:trophyemoji:1517928090708345032> Вам выдана роль за улов!", ephemeral=True)
     elif chance < 0.1:
         fish_text = "ⲿυⲃⲩю ⲁⲕⲩⲗⲩ! <:sharkemoji:1518009750078492944>"
-        reward = 13
+        reward = random.randint(27, 36)
         role = interaction.guild.get_role(1518010342410686606)
         if role:
             await interaction.user.add_roles(role, reason=f"Выловил улов!")
             await safe_send(interaction,"<:trophyemoji:1517928090708345032> Вам выдана роль за улов!", ephemeral=True)
     elif chance < 0.3:
         fish_text = "պⲩⲕⲩ! <:fish2emoji:1518009317129715843>"
-        reward = 7
+        reward = random.randint(11, 19)
     else:  
         fish_text = "ⲟⲕⲩⲏя. <:fish1emoji:1518008900941774870>"
-        reward = 3
+        reward = random.randint(4, 8)
 
     new_points = user_data["points"] + reward
 
@@ -337,7 +337,7 @@ async def bonus(interaction: discord.Interaction):
         minutes = (seconds_left % 3600) // 60
         await safe_send(interaction, f"**<:accessdeniedemoji:1517986918573408318> {interaction.user.mention}, вы уже забирали награду!**\n⌛ Осталось: **{hours} ч. {minutes} мин.**", ephemeral=True)
         return
-    reward = random.randint(2, 6)
+    reward = random.randint(6, 11)
     new_points = user_data["points"] + reward
 
     await manager.update_user_economic(user_id, new_points, user_data["trees"], user_data["bugs"], user_data["animals"], user_data["werewolfs"], user_data["last_claim"], user_data["last_water"], user_data["last_collect"], user_data["last_fish"], current_time, user_data["last_rob"])
@@ -527,7 +527,7 @@ async def collect(interaction: discord.Interaction):
         await safe_send(interaction, f"<:accessdeniedemoji:1517986918573408318> Домашний скот ещё не готов! Продукты питания будут через: **{time_left}**.", ephemeral=True)
         return
 
-    base_reward = sum(random.randint(6, 10) for _ in range(my_animals))
+    base_reward = sum(random.randint(7, 13) for _ in range(my_animals))
     penalty_text = ""
     if active_werewolfs > 0:
         active_werewolfs -= 1
@@ -760,7 +760,7 @@ async def rob(interaction: discord.Interaction, user: discord.User):
         return
     success = random.random() < 0.4
     if success:
-        new_points = random.randint(5, 14)
+        new_points = random.randint(8, 21)
         await manager.update_user_economic(interaction.user.id, int(robber_data["points"]+new_points), robber_data["trees"], robber_data["bugs"], robber_data["animals"], robber_data["werewolfs"], robber_data["last_claim"], robber_data["last_water"], robber_data["last_collect"], robber_data["last_fish"], robber_data["last_bonus"], current_time)
         await manager.update_user_economic(user.id, int(victim_data["points"]-new_points), victim_data["trees"], victim_data["bugs"], victim_data["animals"], victim_data["werewolfs"], victim_data["last_claim"], victim_data["last_water"], victim_data["last_collect"], victim_data["last_fish"], victim_data["last_bonus"], victim_data["last_rob"])
         
@@ -788,7 +788,7 @@ async def rob(interaction: discord.Interaction, user: discord.User):
         await safe_send(interaction, embed=embed)
         
     else:
-        new_points = random.randint(2, 7)
+        new_points = random.randint(4, 13)
         await manager.update_user_economic(interaction.user.id, int(robber_data["points"]-new_points), robber_data["trees"], robber_data["bugs"], robber_data["animals"], robber_data["werewolfs"], robber_data["last_claim"], robber_data["last_water"], robber_data["last_collect"], robber_data["last_fish"], robber_data["last_bonus"], current_time)
         await manager.update_user_economic(user.id, int(victim_data["points"]+new_points), victim_data["trees"], victim_data["bugs"], victim_data["animals"], victim_data["werewolfs"], victim_data["last_claim"], victim_data["last_water"], victim_data["last_collect"], victim_data["last_fish"], victim_data["last_bonus"], victim_data["last_rob"])
         

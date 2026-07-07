@@ -32,7 +32,9 @@ AVAILABLE_PATTERNS = [
     r"klipy\.com/gifs",
     r"gif(s)?\.",
     r"roblox\.com/users/",
-    r"steamcommunity\.com/profiles/"
+    r"steamcommunity\.com/profiles/",
+    r"cdn\.discordapp\.com/attachments/.*\.gif",
+    r"media\.discordapp\.net/attachments/.*\.gif",
 ]
 SUPPORT_ROLES = [1513487279749074994, 1513487556887449692, 1513487970127183912, 1515424488014221524, 1513261409209811055, 1513271328512147696, 1417895449272258730]
 PANEL_CONFIGS = {}
@@ -107,21 +109,32 @@ anti_spam = AntiSpam()
 class CloseTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="зᴀᴋᴩыᴛь ᴛиᴋᴇᴛ", style=discord.ButtonStyle.danger, custom_id="close_channel_btn")
+    @discord.ui.button(label=discord.ui.Label("зᴀᴋᴩыᴛь ᴛиᴋᴇᴛ"), style=discord.ButtonStyle.danger, custom_id="close_channel_btn")
     async def close_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
         is_support = any(r.id in SUPPORT_ROLES or r.name in SUPPORT_ROLES for r in interaction.user.roles)
         if not interaction.user.guild_permissions.administrator and not is_support:
             await safe_send(interaction, "<:warningemoji:1515756604178305054> У вас нет прав для закрытия этого тикета.", ephemeral=True)
             return
+        await interaction.response.defer()
         # Отключаем кнопку, чтобы избежать спама кликами
         self.clear_items()
         await safe_edit(interaction, view=self)
         await safe_send(interaction, "<:warningemoji:1515756604178305054> **ᴛиᴋᴇᴛ зᴀᴋᴩыᴛ ᴀдʍиниᴄᴛᴩᴀциᴇй.**\n<:forbiddenemoji:1515780232404144279> ϶ᴛоᴛ ᴋᴀнᴀᴧ будᴇᴛ ᴨоᴧноᴄᴛью удᴀᴧᴇн чᴇᴩᴇз **1 ʍинуᴛу**.")
+        asyncio.create_task(self.delete_channel_after_delay(interaction))
+    
+    async def delete_channel_after_delay(self, interaction: discord.Interaction):
         await asyncio.sleep(60)
         try:
-            await interaction.channel.delete(reason="Тикет закрыт и удален по истечении 1 минуты.")
+            channel = interaction.channel
+            if channel:
+                await channel.delete(reason="Тикет закрыт и удален по истечении 1 минуты.")
+                print(f"✅ Канал {channel.name} удален")
         except discord.NotFound:
-            pass  
+            print("⚠️ Канал уже удален")
+        except discord.Forbidden:
+            print("❌ Нет прав для удаления канала")
+        except Exception as e:
+            print(f"❌ Ошибка при удалении канала: {e}")
 
 # --- 2. Модальное окно анкеты для пользователя (Строго до 5 строк) ---
 class DynamicUserModal(discord.ui.Modal):
@@ -205,7 +218,7 @@ class DynamicUserView(discord.ui.View):
         super().__init__(timeout=None)
         self.open_ticket_btn.custom_id = custom_id
 
-    @discord.ui.button(label="оᴛᴋᴩыᴛь ᴛиᴋᴇᴛ", style=discord.ButtonStyle.green)
+    @discord.ui.button(label=discord.ui.Label("оᴛᴋᴩыᴛь ᴛиᴋᴇᴛ"), style=discord.ButtonStyle.green)
     async def open_ticket_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = PANEL_CONFIGS.get(button.custom_id)
         if not fields:
@@ -263,6 +276,17 @@ class TempVoice(commands.Cog):
     async def on_voice_state_update(self, member, before, after):
         if member.bot:
             return
+        if after.channel is None:
+            return
+        channel = await safe_fetch_channel(bot, after.channel.id)
+        if channel is None:
+            print(f"⚠️ Канал {after.channel.id} не найден")
+            return
+        if not member.guild.me.guild_permissions.move_members:
+            print("⚠️ Нет прав на перемещение участников")
+            return
+        if not isinstance(channel, discord.VoiceChannel):
+            return
         # 1. Пользователь ЗАШЁЛ в голосовой канал-триггер
         if after.channel and after.channel.id == TRIGGER_CHANNEL_ID:
             category = await safe_fetch_channel(self.bot, TEMP_CATEGORY_ID)
@@ -276,9 +300,17 @@ class TempVoice(commands.Cog):
             try:
                 await new_channel.set_permissions(member, connect=True, manage_channels=True, move_members=True)
                 await new_channel.set_permissions(member.guild.default_role, connect=True, send_messages=True, attach_files=False)
-            except discord.NotFound:
-                # Канал уже удалён
-                return
+            except discord.Forbidden:
+                print(f"❌ Нет прав для перемещения {member.name}")
+            except discord.HTTPException as e:
+                if e.code == 10003: 
+                    print(f"⚠️ Канал не найден: {e}")
+                elif e.status == 429:
+                    print(f"⏳ Слишком много запросов (rate limit): {e}")
+                else:
+                    print(f"❌ HTTP ошибка: {e}")
+            except Exception as e:
+                print(f"❌ Ошибка в on_voice_state_update: {e}")
             await member.move_to(new_channel)
         # 2. Проверяем ВСЕ временные каналы на пустоту (включая те, откуда пользователь вышел)
         await self.check_empty_temp_channels(member.guild)
@@ -310,7 +342,7 @@ class WarningView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Это уведомление предназначено не для вас.", ephemeral=True)
         else:
-            await safe_send(interaction, "<:grantedemoji:1520173483299049623> В этом канале разрешено отправлять только ссылки на GIF-анимации!", ephemeral=True)
+            await safe_send(interaction, "<:grantedemoji:1520173483299049623> Такого формата ссылки запрещены!", ephemeral=True)
 
 # class ConfirmAction(discord.ui.View):
 #     def __init__(self, user_id, action, target):
@@ -841,7 +873,7 @@ async def warn_user(interaction: discord.Interaction, member: discord.Member = N
         # ✅ Бан при 3 предупреждениях
         if next_warn == 3:
             try:
-                await member.ban(reason=f"3 предупреждения. {reason} (Модератор: {interaction.user})")
+                await member.ban(reason=f"3 предупреждения. {reason} (Модератор: {interaction.user})", delete_message_days=1)
                 await safe_send(
                     interaction,
                     f"<:neutralizeemoji:1515694760990347325> {member.mention} **быᴧ нᴇйᴛᴩᴀᴧизоʙᴀн** зᴀ ᴨᴧохоᴇ ᴨоʙᴇдᴇниᴇ...")
@@ -863,6 +895,55 @@ async def warn_user(interaction: discord.Interaction, member: discord.Member = N
     except Exception as e:
         print(f"Ошибка обновления данных: {e}")
     return next_warn
+
+async def ban_user_by_id(interaction: discord.Interaction, user: discord.User, reason: str):
+    await interaction.response.defer()
+    user_mention = user.mention
+    user_avatar = user.display_avatar.url if user.display_avatar else None
+    
+    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
+    
+    try:
+        await interaction.guild.ban(user, reason=f"{reason} (Модератор: {interaction.user})", delete_message_days=1)
+        await safe_send(interaction, f"<:banemoji:1515689296118677534> {user_mention} **был уᴄᴛᴩᴀнён** <:neutralizeemoji:1515694760990347325>. ᴨᴩичинᴀ: {reason}", ephemeral=False)
+        if log_channel:
+            try:
+                embed = discord.Embed(
+                    title="<:banemoji:1515689296118677534> /нейтрализовать",
+                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
+                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>\n"
+                                f"`ᴨᴩичинᴀ`: {reason} <:clearemoji:1515691240476377218>\n"
+                                f"`стаᴛуᴄ`: Пользователь не был на сервере",
+                    color=discord.Color.brand_red(),
+                    timestamp=interaction.created_at
+                )
+                if user_avatar:
+                    embed.set_thumbnail(url=user_avatar)
+                await safe_send(log_channel, embed=embed)
+            except Exception as e:
+                print(f"Ошибка отправки лога: {e}")
+                
+    except discord.Forbidden:
+        await safe_send(
+            interaction,
+            "<:forbbiden2emoji:1517479332866429008> Нет прав для бана этого пользователя!",
+            ephemeral=True)
+    except discord.HTTPException as e:
+        if e.status == 429:
+            await safe_send(
+                interaction,
+                "⏳ Слишком много запросов. Подождите немного.",
+                ephemeral=True)
+        else:
+            await safe_send(
+                interaction,
+                f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
+                ephemeral=True)
+    except Exception as e:
+        await safe_send(
+            interaction,
+            f"<:forbbiden2emoji:1517479332866429008> Ошибка при бане: {e}",
+            ephemeral=True)
 
 async def send_dm_welcome(member: discord.Member):
     try:
@@ -1020,39 +1101,45 @@ async def kick_member(interaction: discord.Interaction, member: discord.Member, 
 @bot.tree.command(name='нейтрализовать', description='Забанить пользователя.')
 @app_commands.guild_only()
 @app_commands.default_permissions(ban_members=True)
-async def ban_member(interaction: discord.Interaction, member: discord.Member, reason: str ="Не указана"):
-    """Банит участника"""
+async def ban_member(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
     if not interaction.user.guild_permissions.ban_members:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на кик!", ephemeral=True)
+        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на бан!", ephemeral=True)
         return
     if member == interaction.user:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя кикнуть самого себя!", ephemeral=True)
+        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя забанить самого себя!", ephemeral=True)
         return
     if member.guild_permissions.administrator:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя кикнуть администратора!", ephemeral=True)
+        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя забанить администратора!", ephemeral=True)
         return
     if member.bot:
         await safe_send(interaction, "🤖 Нельзя модерировать бота!", ephemeral=True)
         return
-    # ✅ Проверка, что пользователь на сервере
-    if not interaction.guild.get_member(member.id):
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Пользователь не на сервере!", ephemeral=True)
-        return
-    # ✅ Проверка ролей (нельзя банить выше своей роли)
     if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
         await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя забанить пользователя с ролью выше или равной вашей!", ephemeral=True)
         return
+
     await interaction.response.defer()
+    
+    # Получаем данные пользователя для красивого отображения
     safe_user = await safe_fetch_user(interaction.client, member.id)
     if safe_user:
         user_mention = safe_user.mention
         user_avatar = safe_user.display_avatar.url if safe_user.display_avatar else None
+    else:
+        user_mention = member.mention
+        user_avatar = member.display_avatar.url if member.display_avatar else None
+
     # ✅ Получаем канал логов
     log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
+    
     try:
-        await member.ban(reason=f"{reason} (Модератор: {interaction.user})", delete_message_seconds=86400)
+        # ✅ БАНИМ через объект Member (у него есть метод ban)
+        await member.ban(reason=f"{reason} (Модератор: {interaction.user})", delete_message_days=1)
+        
         # ✅ Отправляем сообщение
-        await safe_send(interaction, f"<:banemoji:1515689296118677534> {user_mention} **быᴧ уᴄᴛᴩᴀнён** <:neutralizeemoji:1515694760990347325>. ᴨᴩичинᴀ: {reason}", ephemeral=False)
+        await safe_send(interaction, f"<:banemoji:1515689296118677534> {user_mention} **был уᴄᴛᴩᴀнён** <:neutralizeemoji:1515694760990347325>. ᴨᴩичинᴀ: {reason}", ephemeral=False)
+        
+        # ✅ Логирование
         if log_channel:
             try:
                 embed = discord.Embed(
@@ -1714,7 +1801,7 @@ async def on_message(message):
             member = message.guild.get_member(user_id)
             if member:
                 try:
-                    await member.ban(reason=f"Неавторизованный бот (Автоматический бан)")
+                    await member.ban(reason=f"Неавторизованный бот (Автоматический бан)", delete_message_days=1)
                 except discord.Forbidden:
                     print(f"❌ Нет прав для бана бота {user_name}")
                 except discord.HTTPException as e:
@@ -1724,7 +1811,7 @@ async def on_message(message):
             else:
                 # Если бот не на сервере - используем guild.ban()
                 try:
-                    await message.guild.ban(user, reason=f"Неавторизованный бот (Автоматический бан)")
+                    await message.guild.ban(user, reason=f"Неавторизованный бот (Автоматический бан)", delete_message_days=1)
                 except Exception as e:
                     print(f"❌ Ошибка бана через guild.ban(): {e}")
         return
@@ -1829,7 +1916,7 @@ async def on_message(message):
             await message.author.kick(reason="Спам после нескольких предупреждений")
             await safe_send(message.channel, f"<:kickemoji:1515693208783425617> {message.author.mention} **ʙᴩᴇʍᴇнно оᴛᴄᴛᴩᴀнён** зᴀ ᴄᴨᴀʍ!")
         elif warnings >= 5:
-            await message.author.ban(reason="Многократный спам")
+            await message.author.ban(reason="Многократный спам", delete_message_days=1)
             await safe_send(message.channel, f"<:neutralizeemoji:1515694760990347325> {message.author.mention} **быᴧ нᴇйᴛᴩᴀᴧизоʙᴀн** зᴀ ʍноᴦоᴋᴩᴀᴛный ᴄᴨᴀʍ!")
         return
     if anti_spam.message_history.get(user_id) and time.time() - anti_spam.message_history[user_id][-1] > 30:
@@ -1869,7 +1956,7 @@ async def on_member_join(member):
             
             # ✅ Баним через Member (работает!)
             try:
-                await member.ban(reason="Неавторизованный бот (Автоматическая нейтрализация)")
+                await member.ban(reason="Неавторизованный бот (Автоматическая нейтрализация)", delete_message_days=1)
                     
             except discord.Forbidden:
                 print(f"❌ Нет прав для бана бота {user_name}")
