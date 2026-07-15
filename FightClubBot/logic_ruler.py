@@ -858,6 +858,7 @@ class ModerationFunc():
             
     # =================================================== DM WELCOME FUNC ===============================================
     async def send_dm_welcome(self, member: discord.Member):
+        await self.bot.wait_until_ready()
         guild = member.guild
         
         # Можно получить ID каналов из BotConfig (если они там прописаны)

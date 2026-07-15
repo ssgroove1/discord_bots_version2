@@ -2243,8 +2243,8 @@ class ModerationCommands(commands.Cog):
         self.last_purge_date = None
         # Запускаем фоновую задачу для автоматической очистки логов раз в 2 дня
 
-    async def cog_load(self):
-        self.bot.loop.create_task(self._auto_purge_logs_task())
+    # async def cog_load(self):
+    #     self.bot.loop.create_task(self._auto_purge_logs_task())
 
     async def _auto_purge_logs_task(self):
         # 1. Ждём, пока бот полностью подключится к Discord API
@@ -3466,6 +3466,11 @@ async def on_ready():
     print(f"• Message Content (Текст сообщений): {bot.intents.message_content}")
     print(f"• Members (Участники сервера): {bot.intents.members}")
     print("=========================================")
+    await bot.change_presence(
+        activity=discord.CustomActivity(
+            name="Слежу за порядком 🛡️",
+        )
+    )
 
 # Запуск бота
 if __name__ == "__main__":
