@@ -272,67 +272,75 @@ class SafeCommands():
 
     @staticmethod
     async def safe_fetch_user(bot, user_id: int):
-        """
-        Безопасное получение объекта пользователя.
-        Сначала ищет в кэше, если нет — делает сетевой запрос.
-        """
-        # 1. Ждем, пока бот авторизуется, чтобы избежать ошибок инициализации клиента
-        if not bot.is_ready():
-            await bot.wait_until_ready()
-
-        # 2. Пытаемся взять из быстрой памяти (кэша)
+        # 1. Пытаемся взять из быстрой памяти
         user = bot.get_user(user_id)
         if user is not None:
             return user
 
-        # 3. Если в кэше нет, принудительно запрашиваем у серверов Discord
+        # 2. Безопасное ожидание авторизации бота
+        attempts = 0
+        while not bot.is_ready():
+            if attempts > 20:
+                return None
+            await asyncio.sleep(0.5)
+            attempts += 1
+            
+            user = bot.get_user(user_id)
+            if user is not None:
+                return user
+
+        # 3. Запрашиваем у серверов Discord
         try:
             return await bot.fetch_user(user_id)
         except discord.NotFound:
-            print(f"❌ Пользователь {user_id} действительно не существует в Discord.")
             return None
         except Exception as e:
             print(f"❌ Не удалось получить пользователя {user_id}: {e}")
             return None
-
+        
     @staticmethod
     async def safe_fetch_channel(bot, channel_id: int, max_retries: int = 3):
+        # 1. Сначала ВСЕГДА ищем в быстром кэше (это не требует сети и никогда не падает)
         channel = bot.get_channel(channel_id)
         if channel is not None:
             return channel
 
-        # 2. КРИТИЧЕСКИЙ ФИКС: Если бот еще не готов или HTTP-клиент не инициализирован, 
-        # мы принудительно ждем полной готовности бота.
-        # Это предотвращает ошибку "Client has not been properly initialised"
-        if not bot.is_ready() or not getattr(bot, '_connection', None) or bot.http.is_closed():
-            try:
-                print(f"⏳ Канал {channel_id} запрошен до готовности бота. Ожидаем авторизации клиента...")
-                await bot.wait_until_ready()
-            except Exception as e:
-                print(f"❌ Ошибка при ожидании готовности бота для канала {channel_id}: {e}")
+        # 2. Безопасное ожидание запуска бота без использования wait_until_ready()
+        # Если бот еще не вошел в сеть, мы просто засыпаем на 0.5 секунды по кругу
+        attempts = 0
+        while not bot.is_ready():
+            if attempts > 20: # Защита от вечного цикла (максимум ждем 10 секунд)
+                print(f"⚠️ Бот так и не авторизовался за 10 секунд. Канал {channel_id} пропущен.")
                 return None
+            print(f"⏳ Канал {channel_id} запрошен до авторизации бота. Ожидаем готовности клиента...")
+            await asyncio.sleep(0.5)
+            attempts += 1
+            
+            # Пытаемся снова забрать из кэша после паузы
+            channel = bot.get_channel(channel_id)
+            if channel is not None:
+                return channel
 
-        # 3. Делаем безопасный запрос к API Discord с обработкой Rate Limit и ошибок прав
+        # 3. Делаем безопасный запрос к API Discord
         for attempt in range(max_retries):
             try:
                 return await bot.fetch_channel(channel_id)
             except discord.HTTPException as e:
                 if e.status == 429:  # Rate Limit
                     retry_after = float(e.response.headers.get('Retry-After', 1))
-                    print(f"⏳ Rate Limit при получении канала {channel_id}. Ожидание {retry_after} сек...")
                     await asyncio.sleep(retry_after * (attempt + 1))
                     continue
                 else:
                     print(f"❌ HTTP ошибка при получении канала {channel_id}: {e}")
                     return None
             except discord.Forbidden:
-                print(f"❌ Нет доступа (права) к каналу {channel_id}")
+                print(f"❌ Нет доступа к каналу {channel_id}")
                 return None
             except discord.NotFound:
-                print(f"❌ Канал {channel_id} не найден на сервере")
+                print(f"❌ Канал {channel_id} не найден")
                 return None
             except Exception as e:
-                print(f"❌ Неизвестная ошибка при получении канала {channel_id}: {e}")
+                print(f"❌ Ошибка при получении канала {channel_id}: {e}")
                 return None
                 
         return None
