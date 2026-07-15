@@ -686,7 +686,7 @@ async def pay(interaction: discord.Interaction, user: discord.User, points: int)
     if points <= 0:
         await safe_send(interaction, "<:accessdeniedemoji:1517986918573408318> Сумма должна быть больше 0!", ephemeral=True)
         return
-    MIN_PAY = 10
+    MIN_PAY = 5
     if points < MIN_PAY:
         await safe_send(interaction, f"<:accessdeniedemoji:1517986918573408318> Минимальная сумма для перевода - {MIN_PAY} монет!", ephemeral=True)
         return
@@ -779,7 +779,7 @@ async def rob(interaction: discord.Interaction, user: discord.User):
             value=f"**{int(victim_data['points']-new_points)}** <:physpoints:1515371982571704361>",
             inline=True
         )
-        embed.set_footer(text="ну и зᴧодᴇй жᴇ ʙы... <:werewolfsemoji:1517998966468378827>")
+        embed.set_footer(text="ну и зᴧодᴇй жᴇ ʙы...")
         try:
             await user.send(f"<:moneybagemoji:1518230296078843964> ʙᴀᴄ оᴦᴩᴀбиᴧ <@{interaction.user.id}> нᴀ `{new_points}` <:physpoints:1515371982571704361>!")
         except:

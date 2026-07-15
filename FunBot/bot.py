@@ -203,6 +203,7 @@ class get_flower(discord.ui.View):
         self.user = user
         self.target = target
         self.text = text
+        self.message = None
     
     @discord.ui.button(label="ᴨоᴧучиᴛь цʙᴇᴛы", style=discord.ButtonStyle.primary, emoji="💐")
     async def get_flower_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -753,7 +754,7 @@ async def kiss_command(interaction: discord.Interaction, member: discord.Member)
     await make_interaction_command(
         kiss_gifs,
         "🤗 Поцелуйчики!",
-        "поцеловал",
+        "поцеловал(а)",
         discord.Color.brand_red(),
         "😥 Простите, вы не можете поцеловать самого себя!"
     )(interaction, member)
@@ -764,7 +765,7 @@ async def pat_command(interaction: discord.Interaction, member: discord.Member):
     await make_interaction_command(
         pat_gifs,
         "🤗 Прижимашки!",
-        "погладил",
+        "погладил(а)",
         discord.Color.purple(),
         "😥 Простите, вы не можете погладить себя!"
     )(interaction, member)
@@ -775,7 +776,7 @@ async def hello_command(interaction: discord.Interaction, member: discord.Member
     await make_interaction_command(
         hello_gifs,
         "🤗 Приветствие!",
-        "поздаровался с",
+        "поздаровался(лась) с",
         discord.Color.gold(),
         "😥 Простите, вы не можете поздароваться с собой!"
     )(interaction, member)
@@ -786,7 +787,7 @@ async def slap_command(interaction: discord.Interaction, member: discord.Member)
     await make_interaction_command(
         slap_gifs,
         "😨 Рукоприкладство!",
-        "дал леща",
+        "дал(а) леща",
         discord.Color.darker_grey(),
         "😏 Вы не можете ударить себя самого!"
     )(interaction, member)
@@ -836,11 +837,11 @@ async def gift_user(interaction: discord.Interaction, member: discord.Member, te
     random_gif = random.choice(flower_gifs)
     embed = discord.Embed(
         title="🤗 Цветочки, подарочки!",
-        description=f"{interaction.user.mention} подарил {member.mention} цветы! 💕",
+        description=f"{interaction.user.mention} подарил(а) {member.mention} цветы! 💕",
         color=discord.Color.brand_red()
     )
     embed.set_image(url=random_gif)
-    await safe_send(interaction, embed=embed, view=view, ephemeral=False)
+    await send_with_view(interaction, embed=embed, view=view, ephemeral=False)
 
 @bot.tree.command(name="мой_брак", description="Показать информацию о вашем браке.")
 @app_commands.describe(user="Пользователь, информацию о браке которого вы хотите узнать.")
@@ -1279,7 +1280,7 @@ async def on_message(message):
                 await safe_send(message, f"**ⲡⲟⲗьⳅⲟⲃⲁⲧⲉⲗυ, ⲡⲟⳅⲇⲣⲁⲃⲗяю! <a:makise:1514939694624800818>**\nʙы доɯᴧи до {user_number}, ᴨᴩодоᴧжᴀйᴛᴇ ʙ ᴛоʍ жᴇ духᴇ! <a:oshimai:1514940166626742382>")
             next_number_in_count_channel += 1
         except (ValueError, TypeError):
-            await safe_delete(message)
+            await safe_delete(message, delay=1)
             if role:
                 await message.author.add_roles(role, reason="<:deniedemoji:1519737463126360294> Не число в канале счёта")
             asyncio.create_task(remove_role_at_time(message.author, role, 10))

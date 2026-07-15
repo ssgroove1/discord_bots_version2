@@ -1,2081 +1,3033 @@
-import discord, sys, os, asyncio, io, time, re, aiohttp, random
+import discord, sys, os, asyncio, time, re, random, traceback, difflib
 from dotenv import load_dotenv
 from collections import defaultdict
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from database.db_logic import DB_Manager
-from PIL import Image, ImageDraw, ImageFont, ImageOps
-from discord.errors import HTTPException, Forbidden, NotFound
-from discord import Interaction, Message
+from discord import Interaction
+from config import BotConfig
+from FightClubBot.logic_ruler import ModerationFunc
+from FightClubBot.logic_ticket import *
+from safe_commands import *
 
 env_path = Path(__file__).parent.parent / "shared.env"
 load_dotenv(env_path)
-PREFIX = os.getenv('COMMAND_PREFIX')
-COMMANDS_CHANNEL, MOD_COMMANDS_CHANNEL = int(os.getenv('COMMANDS_CHANNEL_ID')), int(os.getenv('MOD_COMMANDS_CHANNEL_ID'))
-WELCOME_CHANNEL, COUNT_CHANNEL, MOD_LOGS, MOD_LOGS_COMMANDS = int(os.getenv('WELCOME_CHANNEL_ID')), int(os.getenv('COUNT_CHANNEL_ID')), int(os.getenv('MOD_LOGS_CHANNEL_ID')), int(os.getenv('MOD_LOGS_CHANNEL_ID2'))
-CATEGORY_TICKET_ID = int(os.getenv('CATEGORY_TICKETS_ID'))
-TEMP_CATEGORY_ID = int(os.getenv('TEMP_CATEGORY_ID'))
-TRIGGER_CHANNEL_ID = int(os.getenv('TRIGGER_CHANNEL_ID'))
-COUNT_ROLE = int(os.getenv('COUNT_BAD_ROLE'))
-MUTED_ROLE = int(os.getenv('MUTED_ROLE'))
-FIRST_WARN_ROLE, SECOND_WARN_ROLE, THIRD_WARN_ROLE, WARNINGS_CATEGORY_ROLE = int(os.getenv('FIRST_WARN_ROLE')), int(os.getenv('SECOND_WARN_ROLE')), int(os.getenv('THIRD_WARN_ROLE')), int(os.getenv('WARNINGS_CATEGORY_ROLE'))
-JOIN_ROLE1, JOIN_ROLE2, JOIN_ROLE3 = int(os.getenv('JOIN_ROLE1')), int(os.getenv('JOIN_ROLE2')), int(os.getenv('JOIN_ROLE3'))
-GUILD_ID, DEVELOPER_ID = int(os.getenv('GUILD_ID')),int(os.getenv('DEVELOPER_ID'))
-URL_REGEX = r"https?://[^\s]+"
-AVAILABLE_PATTERNS = [
-    r"\.gif($|\?)",
-    r"tenor\.com/view",
-    r"giphy\.com/gifs",
-    r"klipy\.com/gifs",
-    r"gif(s)?\.",
-    r"roblox\.com/users/",
-    r"steamcommunity\.com/profiles/",
-    r"cdn\.discordapp\.com/attachments/.*\.gif",
-    r"media\.discordapp\.net/attachments/.*\.gif",
-]
-SUPPORT_ROLES = [1513487279749074994, 1513487556887449692, 1513487970127183912, 1515424488014221524, 1513261409209811055, 1513271328512147696, 1417895449272258730]
-PANEL_CONFIGS = {}
-FONT_PATH = "UNCAGE-Regular.ttf"
-LEVEL_ROLES = {
-    1: 1516414618212503632,
-    5: 1513266642988171304,
-    10: 1512913425519345674,
-}
-trusted_bots = {1514273648364753016, 1513553810369417216, 1512556017492295851, 1515369279724195891, 302050872383242240, 575776004233232386, 315926021457051650}
+VERIFICATION_MESSAGES = {}
+XP_COOLDOWNS = {}
 
 # Настройки бота
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.moderation = True
+bot = commands.Bot(command_prefix=BotConfig.COMMAND_PREFIX, intents=intents)
 
-bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+init_safe(bot) # safe_send, safe_reply...
 
-# ========== КЛАССЫ ДЛЯ КНОПОК ==========
+# ========== СИСТЕМЫ ==========
 
-class AntiSpam:
-    def __init__(self, max_messages=4, time_window=5):
+class AntiSpam(commands.Cog):
+
+    def __init__(self, bot):
+        self.bot = bot
+
         self.message_history = defaultdict(list)
-        self.spam_warnings = defaultdict(int)
-        self.muted_users = {}
-        self.max_messages = max_messages
-        self.time_window = time_window
-    
-    def is_spam(self, user_id, current_time=None):
-        if current_time is None:
-            current_time = time.time()
-        history = self.message_history[user_id]
-        while history and history[0] < current_time - self.time_window:
-            history.pop(0)
-        history.append(current_time)
-        return len(history) > self.max_messages
-    
-    def add_spam_warning(self, user_id):
-        """Добавляет предупреждение за спам"""
-        self.spam_warnings[user_id] += 1
-        return self.spam_warnings[user_id]
-    
-    async def is_muted(self, member):
-        if not hasattr(member, 'guild'):
+        self.spam_warnings = {}
+        self.spam_warnings = {}
+        self.text_warnings = {}
+        self.last_purge_time = {}
+        self.warned_users = set()
+
+        self.processing_users = set()
+        self.processing_lock = asyncio.Lock()
+        self.last_process_time = {}
+
+        self.max_messages = 5
+        self.time_window = 4
+        self.purge_delay = 2.0
+        self.min_process_interval = 1.0
+
+        # 📌 Настройки фильтров КАПСА и символов
+        self.min_caps_length = 7  # Длина сообщения, начиная с которой проверяется капс
+        self.caps_threshold = 0.70  # Порог капса (70% и более заглавных букв)
+        self.max_emoji_count = 4  # Максимум эмодзи в одном сообщении
+        self.max_repeated_chars = 5  # Максимум одинаковых символов подряд (например, "ааааааа")
+
+        self.bot.loop.create_task(self._auto_reset_warnings())
+        self.bot.loop.create_task(self._cleanup_processing())
+
+    # 🔍 Вспомогательные проверки текста
+    def _is_caps(self, text: str) -> bool:
+        """Проверяет, превышает ли процент заглавных букв допустимый порог."""
+        letters = [char for char in text if char.isalpha()]
+        if len(letters) < self.min_caps_length:
             return False
-        
-        muted_role = member.guild.get_role(MUTED_ROLE)
-        if muted_role:
-            return muted_role in member.roles
+
+        uppercase_count = sum(1 for char in letters if char.isupper())
+        return (uppercase_count / len(letters)) >= self.caps_threshold
+
+    def _is_symbol_spam(self, text: str) -> bool:
+        """Проверяет сообщение на спам эмодзи или повторяющимися символами."""
+        # 1. Поиск кастомных и стандартных эмодзи Discord
+        custom_emojis = re.findall(r"<a?:[a-zA-Z0-9_]+:[0-9]+>", text)
+        # Поиск Unicode эмодзи
+        unicode_emojis = re.findall(
+            r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F700-\U0001F77F]",
+            text,
+        )
+
+        if (len(custom_emojis) + len(unicode_emojis)) > self.max_emoji_count:
+            return True
+
+        # 2. Поиск длинных повторяющихся символов подряд (например, "аааааааааа" или "!!!!!!!!")
+        if re.search(r"(.)\1{" + str(self.max_repeated_chars) + r",}", text):
+            return True
+
         return False
 
-    async def mute_user(self, member, duration_seconds):
-        muted_role = member.guild.get_role(MUTED_ROLE)
-        if not muted_role:
-            print("Роль Muted не найдена!")
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not message.guild or message.author.bot:
             return
-        await member.add_roles(muted_role, reason=f"Мут на {duration_seconds // 60} минут")
-        await asyncio.sleep(duration_seconds)
-        await member.remove_roles(muted_role, reason="Окончание мута")
-    
-    def reset_warnings(self, user_id):
-        self.message_history[user_id] = []
-        self.spam_warnings[user_id] = 0
-        self.muted_users.pop(user_id, None)
-    
-    def get_spam_warning_count(self, user_id):
-        return self.spam_warnings[user_id]
-anti_spam = AntiSpam()
 
-# --- 1. Кнопка управления внутри созданного чата тикета ---
-class CloseTicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    @discord.ui.button(label="зᴀᴋᴩыᴛь ᴛиᴋᴇᴛ", style=discord.ButtonStyle.danger)
-    async def close_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        is_support = any(r.id in SUPPORT_ROLES or r.name in SUPPORT_ROLES for r in interaction.user.roles)
-        if not interaction.user.guild_permissions.administrator and not is_support:
-            await safe_send(interaction, "<:warningemoji:1515756604178305054> У вас нет прав для закрытия этого тикета.", ephemeral=True)
+        if message.author.guild_permissions.administrator:
             return
-        await interaction.response.defer()
-        # Отключаем кнопку, чтобы избежать спама кликами
-        self.clear_items()
-        await safe_edit(interaction, view=self)
-        await safe_send(interaction, "<:warningemoji:1515756604178305054> **ᴛиᴋᴇᴛ зᴀᴋᴩыᴛ ᴀдʍиниᴄᴛᴩᴀциᴇй.**\n<:forbiddenemoji:1515780232404144279> ϶ᴛоᴛ ᴋᴀнᴀᴧ будᴇᴛ ᴨоᴧноᴄᴛью удᴀᴧᴇн чᴇᴩᴇз **1 ʍинуᴛу**.")
-        asyncio.create_task(self.delete_channel_after_delay(interaction))
-    
-    async def delete_channel_after_delay(self, interaction: discord.Interaction):
-        await asyncio.sleep(60)
+
+        support_roles = BotConfig.SUPPORT_ROLES.get(
+            "second_order", []
+        ) + BotConfig.SUPPORT_ROLES.get("third_order", [])
+        if any(role.id in support_roles for role in message.author.roles):
+            return
+
+        user_id = message.author.id
+        current_time = datetime.now().timestamp()
+        content = message.content
+
+        # Блокировка от параллельных срабатываний
+        if user_id in self.processing_users:
+            return
+
+        # 1. ПРОВЕРКА НА КАПС И СМАЙЛЫ
+        if content and (self._is_caps(content) or self._is_symbol_spam(content)):
+            self.processing_users.add(user_id)
+
+            try:
+                # Мгновенно удаляем сообщение с капсом/смайлами
+                try:
+                    BotConfig.deleted_by_bot.add(message.id)
+                    await safe_delete(message)
+                except Exception:
+                    pass
+
+                # Увеличиваем счетчик текстовых предупреждений
+                self.text_warnings[user_id] = self.text_warnings.get(user_id, 0) + 1
+                current_text_warns = self.text_warnings[user_id]
+
+                if current_text_warns < 4:
+                # 💬 1, 2, 3 предупреждения — просто предупреждаем в чате
+                    await safe_send(
+                        message.channel,
+                        f"<:warningemoji:1515756604178305054> {message.author.mention},"
+                        " прекратите использовать капс / спамить смайлами!"
+                        f" **[{current_text_warns}/4]**",
+                        delete_after=5,
+                    )
+                else:
+                    # 🚨 4-й раз — сбрасываем мелкий счетчик и выдаем системный warn_count += 1
+                    self.text_warnings[user_id] = 0
+                    await self._handle_spam(message, reason="нᴇ ᴨᴩᴇʙыɯᴀйᴛᴇ ᴧиʍиᴛ ᴋᴀᴨᴄᴀ/ᴄʍᴀйᴧоᴋ (нᴀᴋᴀзуᴇʍо)")
+
+            finally:
+                await asyncio.sleep(1.5)
+                self.processing_users.discard(user_id)
+            return
+
+        # 2. ПРОВЕРКА НА ЧАСТОТУ СООБЩЕНИЙ (ФЛУД)
+        self._clean_old_messages(user_id, current_time)
+        self.message_history[user_id].append(current_time)
+
+        if len(self.message_history[user_id]) > self.max_messages:
+            self.processing_users.add(user_id)
+            try:
+                self.last_process_time[user_id] = current_time
+                await self._handle_spam(message, reason="Частая отправка сообщений")
+            finally:
+                await asyncio.sleep(2.0)
+                self.processing_users.discard(user_id)
+
+    def _clean_old_messages(self, user_id, current_time):
+        if user_id not in self.message_history:
+            return
+        cutoff = current_time - self.time_window
+        self.message_history[user_id] = [
+            t for t in self.message_history[user_id] if t > cutoff
+        ]
+        if not self.message_history[user_id]:
+            del self.message_history[user_id]
+
+    async def _handle_spam(
+        self, message: discord.Message, reason: str = "Спам в чате"):
+        user = message.author
+        user_id = user.id
+        guild = message.guild
+
+        me = guild.me
+        if not me.guild_permissions.manage_messages:
+            return
+
+        # Увеличиваем счетчик варнов
+        self.spam_warnings[user_id] = self.spam_warnings.get(user_id, 0) + 1
+        warn_count = self.spam_warnings[user_id]
+        user_mention = user.mention
+
+        # Очищаем чат от сообщений спамера
+        await self._purge_user_messages(message.channel, user_id)
+
         try:
-            channel = interaction.channel
-            if channel:
-                await channel.delete(reason="Тикет закрыт и удален по истечении 1 минуты.")
-                print(f"✅ Канал {channel.name} удален")
-        except discord.NotFound:
-            print("⚠️ Канал уже удален")
+            # 1 ВАРНИНГ: Предупреждение (с авто-удалением сообщения бота через 5 сек)
+            if warn_count == 1:
+                await safe_send(
+                    message.channel,
+                    f"<:warningemoji:1515756604178305054> {user_mention},"
+                    f" прекратите спам! Причина: **{reason}**.",
+                    delete_after=5,)  # 👈 Чтобы бот сам не засорял чат своим предупреждением!
+
+            # 2 ВАРНИНГ: Тайм-аут (Мут)
+            elif warn_count == 2:
+                if me.guild_permissions.moderate_members:
+                    await commands_func.mute_func(
+                        target=message.channel,
+                        member=message.author,
+                        rule="П. 2.4 (Флуд/Спам/Оффтоп)",
+                        minutes=10,
+                        reason=f"Повторный спам ({reason})",
+                    )
+                else:
+                    await safe_send(
+                        message.channel,
+                        "<:forbiddenemoji:1515780232404144279> У бота нет прав"
+                        " для мута!",
+                        delete_after=5,
+                    )
+
+            # 3 ВАРНИНГ: Кик
+            elif warn_count == 3:
+                if me.guild_permissions.kick_members:
+                    await commands_func.kick_func(
+                        target=message.channel,
+                        member=message.author,
+                        rule="П. 2.4 (Флуд/Спам/Оффтоп)",
+                        reason=f"Мночисленный спам ({reason})",
+                    )
+                else:
+                    await safe_send(
+                        message.channel,
+                        "<:forbiddenemoji:1515780232404144279> У бота нет прав"
+                        " для мута!",
+                        delete_after=5,
+                    )
+
+            # 4 ВАРНИНГ: Бан
+            elif warn_count >= 4:
+                if me.guild_permissions.ban_members:
+                    await commands_func.ban_func(
+                        target=message.channel,
+                        user=message.author,
+                        rule="П. 2.4 (Флуд/Спам/Оффтоп)",
+                        reason=f"Спам-атака ({reason})",
+                    )
+                    self.spam_warnings[user_id] = 0  # Сбрасываем только при бане
+                else:
+                    await safe_send(
+                        message.channel,
+                        "<:forbiddenemoji:1515780232404144279> У бота нет прав"
+                        " на бан!",
+                        delete_after=5,
+                    )
+
         except discord.Forbidden:
-            print("❌ Нет прав для удаления канала")
+            print(f"❌ Недостаточно прав для наказания {user}")
         except Exception as e:
-            print(f"❌ Ошибка при удалении канала: {e}")
+            print(f"❌ Ошибка при обработке спама: {e}")
 
-# --- 2. Модальное окно анкеты для пользователя (Строго до 5 строк) ---
-class DynamicUserModal(discord.ui.Modal):
-    def __init__(self, title: str, fields_list: list):
-        super().__init__(title=title[:45])
-        self.fields_list = fields_list
-        self.inputs = []
-        # Берем только первые 5 элементов на случай, если админ указал больше
-        for label in fields_list[:5]:
-            text_input = discord.ui.TextInput(
-                label=label[:45],
-                placeholder="Введите ответ...",
-                required=True,
-                max_length=200
-            )
-            self.add_item(text_input)
-            self.inputs.append(text_input)
+    async def _reset_warn_flag(self, user_id, delay):
+        await asyncio.sleep(delay)
+        self.warned_users.discard(user_id)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        # Откладываем ответ, чтобы Discord не выдал ошибку из-за создания канала
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.guild
-        member = interaction.user
-        # Настройка приватности для нового канала
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False), # Закрываем для всех
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True) # Открываем автору
-        }
+    async def _purge_user_messages(self, channel, user_id, limit=15):
+        channel_id = channel.id
+        now = datetime.now()
 
-        # Выдаем доступ ролям тех. поддержки
-        for role_id_or_name in SUPPORT_ROLES:
-            role = None
-            if isinstance(role_id_or_name, int):
-                role = guild.get_role(role_id_or_name)
+        if channel_id in self.last_purge_time:
+            elapsed = (now - self.last_purge_time[channel_id]).total_seconds()
+            if elapsed < self.purge_delay:
+                await asyncio.sleep(
+                    self.purge_delay - elapsed + random.uniform(0.1, 0.3)
+                )
+
+        def check(msg):
+            return msg.author.id == user_id
+
+        try:
+            deleted = await channel.purge(limit=min(limit, 10), check=check)
+            self.last_purge_time[channel_id] = datetime.now()
+            if deleted:
+                print(
+                    f"🗑️ Удалено {len(deleted)} сообщений пользователя {user_id}")
+
+        except discord.HTTPException as e:
+            if e.status == 429:
+                retry_after = getattr(e, "retry_after", 5)
+                print(f"⏳ Rate limit 429! Ожидание {retry_after:.1f} сек...")
+                await asyncio.sleep(retry_after)
             else:
-                role = discord.utils.get(guild.roles, name=role_id_or_name)
+                print(f"❌ Ошибка HTTP при purge: {e}")
+        except discord.Forbidden:
+            print(f"❌ Нет прав Manage Messages в канале {channel}")
+        except Exception as e:
+            print(f"❌ Ошибка purge: {e}")
+
+    async def _auto_reset_warnings(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            await asyncio.sleep(3600)  # Каждый час
+            for user_id in list(self.spam_warnings.keys()):
+                if user_id not in self.message_history:
+                    del self.spam_warnings[user_id]
+
+            # Сбрасываем текстовые предупреждения
+            self.text_warnings.clear()
+
+    async def _cleanup_processing(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            await asyncio.sleep(30)
+        self.processing_users.clear()
+
+# Защита от массового захода для копирования
+class ServerProtection(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.join_tracker = {}        # {user_id: [datetime, ...]}
+        self.message_warnings = {}     # Единая система предпреждений в чате: {user_id: [datetime, ...]}
+        self.quarantined_users = set()
+        self.quarantine_role_id = BotConfig.ROLES.get("quarantine")
+        
+        # Переменные для защиты от рейдов (Anti-Raid)
+        self.global_joins = []         # Список временных меток входов всех пользователей за последнее время
+        self.lockdown_active = False
+
+        self.blocked_patterns = getattr(BotConfig, 'blocked', [])
+        self.compiled_patterns = [re.compile(p, re.IGNORECASE) for p in self.blocked_patterns]
+        self.url_pattern = re.compile(r'https?://[^\s]+', re.IGNORECASE)
+
+        # Время жизни предупреждений в чате (в минутах)
+        self.warning_lifespan = 15
+
+        # Запуск фоновых задач
+        self.bot.loop.create_task(self._auto_cleanup_warnings())
+
+    def is_blocked(self, text: str) -> bool:
+        return any(pattern.search(text) for pattern in self.compiled_patterns)
+
+    def _add_message_warning(self, user_id: int, max_age_minutes: int = 60) -> int:
+        """Единый метод для добавления и подсчёта предупреждений за любые нарушения в чате."""
+        now = datetime.now()
+        cutoff = now - timedelta(minutes=max_age_minutes)
+        
+        if user_id not in self.message_warnings:
+            self.message_warnings[user_id] = []
+        
+        # Очищаем устаревшие записи и добавляем новое предупреждение
+        self.message_warnings[user_id] = [t for t in self.message_warnings[user_id] if t > cutoff]
+        self.message_warnings[user_id].append(now)
+        
+        return len(self.message_warnings[user_id])
+    
+    async def _auto_cleanup_warnings(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                await asyncio.sleep(60) # Проверка каждую минуту
+                now = datetime.now()
+                cutoff = now - timedelta(minutes=self.warning_lifespan)
+
+                # Безопасно итерируемся по копии ключей словаря предупреждений
+                for user_id in list(self.message_warnings.keys()):
+                    # Фильтруем предупреждения, оставляя только те, которые младше 15 минут
+                    active_warnings = [t for t in self.message_warnings[user_id] if t > cutoff]
+                    
+                    if active_warnings:
+                        self.message_warnings[user_id] = active_warnings
+                    else:
+                        # Если все предупреждения пользователя сгорели, полностью удаляем его из памяти
+                        del self.message_warnings[user_id]
+                        
+            except Exception as e:
+                print(f"❌ Ошибка во время авто-очистки предупреждений: {e}")
+
+    async def _run_quarantine_tasks(self, tasks):
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"❌ Ошибка при массовой выдаче ролей карантина: {e}")
+
+    @app_commands.command(name="lockdown", description="Управление экстренным режимом Lockdown (Защита от рейда)")
+    @app_commands.describe(action="Включить (True) или выключить (False) экстренную блокировку входов")
+    @app_commands.default_permissions(administrator=True)
+    async def lockdown(self, interaction: discord.Interaction, action: bool):
+        await interaction.response.defer(ephemeral=True)
+        self.lockdown_active = action
+
+        status = "АКТИВИРОВАН <:redalertemoji:1526209446026678413>" if action else "ДЕАКТИВИРОВАН <:verifiedemoji:1525207492928213204>"
+        color = discord.Color.brand_red() if action else discord.Color.brand_green()
+
+        await safe_send(interaction, f"ᴩᴇжиʍ Lockdown уᴄᴨᴇɯно {status}!", ephemeral=True)
+
+        log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('emergency_logs'))
+        if log_channel:
+            embed_log = discord.Embed(
+                title=f"<:owneremoji:1517494149119611063> ϶ᴋᴄᴛᴩᴇнный ᴩᴇжиʍ Lockdown {'ʙᴋᴧючᴇн' if action else 'ʙыᴋᴧючᴇн'}",
+                description=f"ᴀдʍиниᴄᴛᴩᴀᴛоᴩ {interaction.user.mention} изʍᴇниᴧ ᴦᴧобᴀᴧьный ᴄᴛᴀᴛуᴄ зᴀщиᴛы ᴄᴇᴩʙᴇᴩᴀ.",
+                color=color,
+                timestamp=datetime.now(timezone.utc))
+            embed_log.add_field(
+                name="ᴛᴇᴋущᴇᴇ ᴄоᴄᴛояниᴇ ᴄᴇᴩʙᴇᴩᴀ", 
+                value="<:redalertemoji:1526209446026678413> **ᴨоᴧнᴀя бᴧоᴋиᴩоʙᴋᴀ (ʟᴏᴄᴋᴅᴏᴡɴ)**\nʙᴄᴇ ноʙыᴇ ᴨоᴧьзоʙᴀᴛᴇᴧи изоᴧиᴩуюᴛᴄя ᴀʙᴛоʍᴀᴛичᴇᴄᴋи." if action else "<:verifiedemoji:1525207492928213204> **обычный ᴩᴇжиʍ**\nзᴀщиᴛᴀ ᴩᴀбоᴛᴀᴇᴛ ᴨо ᴄᴛᴀндᴀᴩᴛныʍ ɸиᴧьᴛᴩᴀʍ ʙозᴩᴀᴄᴛᴀ.")
             
-            if role:
-                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True)
+            if interaction.guild and interaction.guild.icon:
+                embed_log.set_footer(text=interaction.guild.name, icon_url=interaction.guild.icon.url)
+                
+            await safe_send(log_channel, embed=embed_log)
 
-        # Получаем указанную категорию
-        category = guild.get_channel(CATEGORY_TICKET_ID)
-        channel_name = f"╠ticket {member.name}"
+    @app_commands.command(name="карантин", description="Отправить пользователя в карантин, сняв с него все роли")
+    @app_commands.describe(member="Участник, которого нужно изолировать", reason="Причина отправки в карантин")
+    @app_commands.checks.has_permissions(manage_roles=True)
+    async def manual_quarantine(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Ручная изоляция модератором"):
+        await interaction.response.defer(ephemeral=True)
+
+        # Защита от изоляции самого себя или администратора
+        if member.id == interaction.user.id:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Вы не можете отправить в карантин самого себя!", ephemeral=True)
+            return
+        if member.guild_permissions.administrator:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Нельзя отправить в карантин администратора сервера!", ephemeral=True)
+            return
+
+        quarantine_role = interaction.guild.get_role(self.quarantine_role_id)
+
+        if not quarantine_role:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Роль карантина не найдена в настройках сервера!", ephemeral=True)
+            return
+
+        # Добавляем в список отслеживания карантина в памяти
+        self.quarantined_users.add(member.id)
+
+        # Собираем роли для сохранения в базу данных
+        current_roles = [role.id for role in member.roles if role.name != "@everyone" and role.id != self.quarantine_role_id]
+
+        try:
+            # Безопасное сохранение ролей в базу данных (если менеджер БД инициализирован)
+            try:
+                if 'manager' in globals():
+                    await globals()['manager'].update_user_roles_ruler(member.id, current_roles)
+                elif hasattr(self.bot, 'manager'):
+                    await self.bot.manager.update_user_roles_ruler(member.id, current_roles)
+            except Exception as db_err:
+                print(f"⚠️ Не удалось сохранить роли в БД для {member.id}: {db_err}")
+
+            # Снимаем все роли, кроме @everyone и неуправляемых (managed / бусты)
+            roles_to_remove = [role for role in member.roles if role.name != "@everyone" and not role.managed]
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove, reason=f"Карантин: {reason} | Модератор: {interaction.user}")
+
+            # Выдаем роль карантина
+            await member.add_roles(quarantine_role, reason=f"Карантин: {reason} | Модератор: {interaction.user}")
+
+            # Ответ модератору
+            await safe_send(
+                interaction,
+                f"<:successemoji:1515691944460685372> {member.mention} успешно отправлен в карантин, его роли сохранены и очищены!",
+                ephemeral=True
+            )
+
+            # Отправка подробного лога в канал логов
+            log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('warning_logs'))
+            if log_channel:
+                embed_log = discord.Embed(
+                    title="<:hazardemoji:1526566003339821207> оᴛᴨᴩᴀʙᴧᴇн нᴀ ᴋᴀᴩᴀнᴛин",
+                    description=f"ʍодᴇᴩᴀᴛоᴩ ʙᴩᴇʍᴇнно изоᴧиᴩоʙᴀᴧ ᴨоᴧьзоʙᴀᴛᴇᴧя и очиᴄᴛиᴧ ᴇᴦо ᴩоᴧи.",
+                    color=discord.Color.dark_orange(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                embed_log.add_field(
+                    name="<:warningemoji:1515756604178305054> изоᴧиᴩоʙᴀн",
+                    value=f"{member.mention}",
+                    inline=True
+                )
+                embed_log.add_field(
+                    name="<:verifiedemoji:1525207492928213204> ʍодᴇᴩᴀᴛоᴩ",
+                    value=f"{interaction.user.mention}",
+                    inline=True
+                )
+                embed_log.add_field(
+                    name="<:pencilemoji:1525177241749950464> ᴨᴩичинᴀ дᴇйᴄᴛʙия",
+                    value=f"```\n{reason}```",
+                    inline=False
+                )
+                
+                if member.display_avatar:
+                    embed_log.set_thumbnail(url=member.display_avatar.url)
+                if interaction.guild and interaction.guild.icon:
+                    embed_log.set_footer(text=interaction.guild.name, icon_url=interaction.guild.icon.url)
+
+                await safe_send(log_channel, embed=embed_log)
+
+        except discord.Forbidden:
+            await safe_send(
+                interaction,
+                "❌ У бота нет прав на изменение ролей этого пользователя! Убедитесь, что роль бота находится выше остальных.",
+                ephemeral=True
+            )
+        except Exception as e:
+            await safe_send(interaction, f"❌ Ошибка при отправке в карантин: {e}", ephemeral=True)
+
+    @app_commands.command(name="верифицировать", description="Снять карантин.")
+    @app_commands.describe(member="Участник, которого следует верифицировать")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def verify_member(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+
+        quarantine_role = interaction.guild.get_role(self.quarantine_role_id)
+        # Проверяем, находится ли пользователь в карантине
+        if quarantine_role and quarantine_role not in member.roles:
+            await safe_send(
+                interaction,
+                f"<:forbiddenemoji:1515780232404144279> {member.mention} не находится"
+                " в карантине!",
+                ephemeral=True,)
+            return
+
+        try:
+            # Снимаем карантин и выдаем роль игрока
+            if quarantine_role and quarantine_role in member.roles:
+                await member.remove_roles(
+                    quarantine_role,
+                    reason=f"Верифицирован модератором {interaction.user.name}",)
+
+            await commands_func.get_base_roles(member=member)
+
+            # Ответ модератору
+            await safe_send(
+                interaction,
+                f"<:successemoji:1515691944460685372> {member.mention} успешно"
+                " верифицирован!",
+                ephemeral=True,
+            )
+            self.quarantined_users.discard(member.id)
+
+            # Уведомление пользователю в ЛС
+            dm_embed = discord.Embed(
+                title="<:successemoji:1515691944460685372> ʙы уᴄᴨᴇɯно ʙᴇᴩиɸициᴩоʙᴀны!",
+                description=(
+                    f"ᴀдʍиниᴄᴛᴩᴀᴛоᴩ {interaction.user.mention} ᴄняᴧ ᴄ ʙᴀᴄ оᴦᴩᴀничᴇния.\nᴨᴩияᴛноᴦо общᴇния!"
+                ),
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            try:
+                await safe_dm_send(member.id, embed=dm_embed)
+            except Exception:
+                pass
+
+            # Лог модерации
+            log_channel = await safe_fetch_channel(
+                interaction.client, BotConfig.CHANNELS.get("mod_logs_commands")
+            )
+            if log_channel:
+                embed_log = discord.Embed(
+                    title="<:successemoji:1515691944460685372> уᴄᴨᴇɯнᴀя ʙᴇᴩиɸиᴋᴀция",
+                    description=f"ᴨоᴧьзоʙᴀᴛᴇᴧь уᴄᴨᴇɯно ᴨᴩоɯᴇᴧ ᴨᴩоʙᴇᴩᴋу и быᴧ доᴨущᴇн нᴀ ᴄᴇᴩʙᴇᴩ.",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+                
+                embed_log.add_field(
+                    name="<:hazardemoji:1526566003339821207> учᴀᴄᴛниᴋ",
+                    value=f"{member.mention}\n`ID: {member.id}`",
+                    inline=True
+                )
+                
+                embed_log.add_field(
+                    name="<:verifiedemoji:1525207492928213204> ʍодᴇᴩᴀᴛоᴩ",
+                    value=f"{interaction.user.mention}\n`ID: {interaction.user.id}`",
+                    inline=True
+                )
+                
+                # Добавляем аватар верифицированного пользователя в качестве миниатюры
+                if member.display_avatar:
+                    embed_log.set_thumbnail(url=member.display_avatar.url)
+                    
+                # Footer с иконкой и названием сервера
+                if interaction.guild and interaction.guild.icon:
+                    embed_log.set_footer(
+                        text=interaction.guild.name, 
+                        icon_url=interaction.guild.icon.url
+                    )
+                    
+                await safe_send(log_channel, embed=embed_log)
+
+        except discord.Forbidden:
+            await safe_send(
+                interaction,
+                "<:forbiddenemoji:1515780232404144279> У бота недостаточно прав для"
+                " управления ролями!",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await safe_send(
+                interaction,
+                f"<:forbiddenemoji:1515780232404144279> Произошла ошибка: {e}",
+                ephemeral=True,
+            )
+
+    @app_commands.command(name="нейтрализовать_карантин", description="Экстренная массовая очистка (кик/бан) всех участников в карантине")
+    @app_commands.describe(
+        action="Что сделать с участниками карантина (kick - исключить, ban - забанить)",
+        reason="Укажите причину для модерационных логов")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Исключить (Kick)", value="kick"),
+        app_commands.Choice(name="Забанить (Ban)", value="ban")])
+    @app_commands.checks.has_permissions(administrator=True)
+    async def purge_quarantine(self, interaction: discord.Interaction, action: str, reason: str = "Экстренное устранение рейда"):
+        await interaction.response.defer(ephemeral=True)
+
+        if not self.quarantined_users:
+            await safe_send(
+                interaction,
+                "⚠️ В карантине сейчас нет пользователей для очистки!",
+                ephemeral=True)
+            return
+
+        guild = interaction.guild
+        user_ids_to_purge = list(self.quarantined_users)
         
-        # Создаем приватный текстовый канал
-        ticket_channel = await guild.create_text_channel(
-            name=channel_name,
-            category=category,
-            overwrites=overwrites,
-            reason=f"Тикет для {member}"
-        )
+        purge_tasks = []
+        successful_purges = []
+        failed_purges = 0
 
-        # Формируем красивый эмбед с дубликатом анкеты
-        embed = discord.Embed(
-            title=f"<:unbanemoji:1515696568156557433> ноʙоᴇ ᴩᴀзобᴧᴀчᴇниᴇ оᴛ {member}",
-            description=f"<:successemoji:1515691944460685372> добᴩо ᴨожᴀᴧоʙᴀᴛь ʙ ᴨоддᴇᴩжᴋу, {member.mention}!\n<:techicalemoji:1515678259767939262> оᴨиɯиᴛᴇ ʙᴀɯу ᴨᴩобᴧᴇʍу, ᴇᴄᴧи ϶ᴛо нᴇобходиʍо. ᴀдʍиниᴄᴛᴩᴀция ᴄᴋоᴩо оᴛʙᴇᴛиᴛ ʙᴀʍ.",
-            color=discord.Color.darker_grey()
-        )
-        
-        # Заполняем эмбед ответами пользователя
-        for text_input in self.inputs:
-            if isinstance(text_input, discord.ui.TextInput):
-                embed.add_field(name=text_input.label, value=text_input.value, inline=False)
+        # Собираем список пользователей, которые находятся на сервере
+        for user_id in user_ids_to_purge:
+            member = guild.get_member(user_id)
+            if not member:
+                # Если пользователя уже нет на сервере, просто удаляем из списка памяти
+                self.quarantined_users.discard(user_id)
+                continue
 
-        embed.set_footer(text=f"ID пользователя: {member.id}")
+            # Защита от случайного удаления модераторов/админов
+            if member.guild_permissions.administrator:
+                continue
 
-        # Отправляем анкету и кнопку закрытия в САМОЕ НАЧАЛО нового приватного чата
+            if action == "kick":
+                purge_tasks.append(member.kick(reason=f"{reason} | Администратор: {interaction.user}"))
+            elif action == "ban":
+                purge_tasks.append(member.ban(reason=f"{reason} | Администратор: {interaction.user}", delete_message_days=1))
+            
+            successful_purges.append(member)
+
+        if not purge_tasks:
+            await safe_send(
+                interaction,
+                "⚠️ На сервере не найдено участников, подходящих под критерии очистки.",
+                ephemeral=True)
+            return
+
+        # Запускаем параллельное массовое удаление нарушителей
+        results = await asyncio.gather(*purge_tasks, return_exceptions=True)
+
+        # Подсчет успешных и неудавшихся действий
+        actual_success_count = 0
+        for index, result in enumerate(results):
+            if isinstance(result, Exception):
+                failed_purges += 1
+                print(f"❌ Ошибка очистки пользователя {successful_purges[index].id}: {result}")
+            else:
+                actual_success_count += 1
+                # Удаляем из списка карантинников тех, кого успешно выгнали
+                self.quarantined_users.discard(successful_purges[index].id)
+
+        action_name = "исключены (кикнуты)" if action == "kick" else "забанены"
+        emoji = "<:kickemoji:1515693208783425617>" if action == "kick" else "<:banemoji:1515689296118677534>"
+
+        # Отвечаем администратору
         await safe_send(
-            ticket_channel,
-            content=f"{member.mention} | ᴀᴅᴍɪɴɪsᴛʀᴀᴛɪᴏɴ",
-            embed=embed,
-            view=CloseTicketView()
+            interaction,
+            f"<:hazardemoji:1526566003339821207> оᴨᴇᴩᴀция зᴀʙᴇᴩɯᴇнᴀ!\n"
+            f"Успешно {action_name}: **{actual_success_count}** пользователей.\n"
+            f"Ошибок выполнения: **{failed_purges}**.",
+            ephemeral=True
+        )
+
+        # Отправляем подробный отчет в логи модерации
+        log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('emergency_logs'))
+        if log_channel:
+            embed_log = discord.Embed(
+                title=f"{emoji} ʍᴀᴄᴄоʙᴀя очиᴄᴛᴋᴀ ᴋᴀᴩᴀнᴛинᴀ",
+                description=f"ᴀдʍиниᴄᴛᴩᴀᴛоᴩ {interaction.user.mention} ᴨᴩиʍᴇниᴧ быᴄᴛᴩую очиᴄᴛᴋу нᴀᴩуɯиᴛᴇᴧᴇй.",
+                color=discord.Color.brand_red() if action == "ban" else discord.Color.dark_orange(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed_log.add_field(name="<:binemoji:1525176536607752202> ʙыбᴩᴀнноᴇ дᴇйᴄᴛʙиᴇ", value=f"**{action.upper()}**", inline=True)
+            embed_log.add_field(name="<:pencilemoji:1525177241749950464> ᴨᴩичинᴀ", value=f"{reason}", inline=True)
+            embed_log.add_field(
+                name="<:successemoji:1515691944460685372> ᴩᴇзуᴧьᴛᴀᴛы", 
+                value=f"уᴄᴨᴇɯно очищᴇно: `{actual_success_count}`\nнᴇ удᴀᴧоᴄь иᴄᴋᴧючиᴛь: `{failed_purges}`", 
+                inline=False
+            )
+            
+            if guild.icon:
+                embed_log.set_footer(text=guild.name, icon_url=guild.icon.url)
+                
+            await safe_send(log_channel, embed=embed_log)
+
+
+    # =========================================================================
+    # СОБЫТИЯ ВХОДА НА СЕРВЕР (JOIN EVENTS)
+    # =========================================================================
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        # ==================== ЛОГИКА ДЛЯ БОТОВ ====================
+        if member.bot:
+            if member.id == bot.user.id:
+                return
+
+            trusted_set = getattr(bot, 'trusted_set', BotConfig.trusted_bots)
+
+            if member.id not in trusted_set:
+                welcome_channel = await safe_fetch_channel(bot, BotConfig.CHANNELS['welcome'])
+                
+                bot_tasks = []
+                
+                # Задача на отправку сообщения
+                if welcome_channel:
+                    bot_tasks.append(
+                        safe_send(
+                            welcome_channel, 
+                            f"<:neutralizeemoji:1515694760990347325> ʙᴩᴀжᴇᴄᴋоᴇ уᴄᴛᴩойᴄᴛʙо, {member.mention}, **быᴧо нᴇйᴛᴩᴀᴧизоʙᴀно** ᴧучɯиʍи ᴄᴨᴇц-оᴛᴩядᴀʍи.", delete_after=5
+                        ))
+
+                # Задача на бан
+                bot_tasks.append(
+                    member.ban(
+                        reason="Неавторизованный бот (Автоматическая нейтрализация)", 
+                        delete_message_days=1))
+
+                # Выполняем действия с неавторизованным ботом параллельно
+                results = await asyncio.gather(*bot_tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, Exception):
+                        print(f"❌ Ошибка при нейтрализации бота {member.name}: {res}")
+                return
+            return
+        
+        # ==================== ДЕТЕКТОР РЕЙДОВ (ANTI-RAID) ====================
+        now = datetime.now()
+        # Очищаем из глобального трекера входов всё, что было более 7 секунд назад
+        self.global_joins = [(t, m) for t, m in self.global_joins if (now - t).total_seconds() < 7]
+        self.global_joins.append((now, member))
+
+        # Если входов за 7 секунд набралось 10 или более, и локдаун еще не активен
+        if len(self.global_joins) >= 10 and not self.lockdown_active:
+            self.lockdown_active = True
+            
+            # Получаем роль карантина
+            quarantine_role = member.guild.get_role(self.quarantine_role_id)
+            
+            # Извлекаем всех пользователей, зашедших за последние 5 секунд
+            raid_members = [m for t, m in self.global_joins]
+            
+            # Асинхронно отправляем в карантин всех первых зашедших (включая тех, кто уже прошел)
+            quarantine_tasks = []
+            for raid_member in raid_members:
+                self.quarantined_users.add(raid_member.id)
+                if quarantine_role and quarantine_role not in raid_member.roles:
+                    quarantine_tasks.append(
+                        raid_member.add_roles(
+                            quarantine_role, 
+                            reason="Изоляция: один из первых участников рейда (Авто-Lockdown)"
+                        )
+                    )
+            
+            # Запускаем фоновую выдачу ролей параллельно для предотвращения задержек
+            if quarantine_tasks:
+                self.bot.loop.create_task(self._run_quarantine_tasks(quarantine_tasks))
+            
+            # Отправляем критический алерт модераторам
+            log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get("emergency_logs"))
+            if log_channel:
+                embed_warn = discord.Embed(
+                    title="<:redalertemoji:1526209446026678413> обнᴀᴩужᴇнᴀ ᴀᴛᴀᴋᴀ (ʀᴀɪᴅ ᴅᴇᴛᴇᴄᴛᴇᴅ) <:redalertemoji:1526209446026678413>",
+                    description=(
+                        f"**϶ᴋᴄᴛᴩᴇнноᴇ дᴇйᴄᴛʙиᴇ:** ᴀʙᴛоʍᴀᴛичᴇᴄᴋи ᴀᴋᴛиʙиᴩоʙᴀн ᴩᴇжиʍ **Lockdown**!\n"
+                        f"зᴀɸиᴋᴄиᴩоʙᴀно **{len(self.global_joins)} ʙходоʙ** зᴀ ᴨоᴄᴧᴇдниᴇ 5 ᴄᴇᴋунд.\n\n"
+                        f"<:hazardemoji:1526566003339821207> **ᴨᴇᴩʙыᴇ {len(raid_members)} зᴀɯᴇдɯих ᴨоᴧьзоʙᴀᴛᴇᴧᴇй ᴛᴀᴋжᴇ быᴧи уᴄᴨᴇɯно оᴛᴨᴩᴀʙᴧᴇны ʙ ᴋᴀᴩᴀнᴛин**."
+                    ),
+                    color=discord.Color.brand_red(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                if member.guild.icon:
+                    embed_warn.set_thumbnail(url=member.guild.icon.url)
+                    embed_warn.set_footer(text=member.guild.name, icon_url=member.guild.icon.url)
+                await safe_send(log_channel, embed=embed_warn)
+
+        # 🛑 1. ПРОВЕРКА LOCKDOWN И ПОВТОРНОГО КАРАНТИНА
+        # Если включен Lockdown или пользователь уже был в карантине
+        is_lockdown_quarantine = self.lockdown_active
+        is_existing_quarantine = member.id in self.quarantined_users
+
+        # 🛑 1. ПРОВЕРКА ПО ID: Если бот уже отправлял этого пользователя в карантин
+        if is_existing_quarantine:
+            # Выдаем роль карантина повторно (без спама в ЛС и логи)
+            quarantine_role = member.guild.get_role(self.quarantine_role_id)
+            if quarantine_role:
+                try:
+                    await member.add_roles(
+                        quarantine_role, reason="Повторный вход (уже в карантине)")
+                except Exception:
+                    pass
+                return
+
+        if is_lockdown_quarantine or is_existing_quarantine:
+            quarantine_role = member.guild.get_role(self.quarantine_role_id)
+            
+            if quarantine_role:
+                try:
+                    reason_text = "Режим Lockdown (Авто-защита от рейда)" if is_lockdown_quarantine else "Повторный вход (уже в карантине)"
+                    await member.add_roles(quarantine_role, reason=reason_text)
+                except Exception as e:
+                    print(f"⚠️ Ошибка выдачи роли карантина в Lockdown: {e}")
+
+            # Если это новый вход во время активного Lockdown, отправляем специальное предупреждение
+            if is_lockdown_quarantine and not is_existing_quarantine:
+                self.quarantined_users.add(member.id)
+                # ЛС пользователю
+                dm_embed = discord.Embed(
+                    title="<:redalertemoji:1526209446026678413> ᴄᴇᴩʙᴇᴩ нᴀ изоᴧяции",
+                    description=(
+                        "нᴀ ᴄᴇᴩʙᴇᴩᴇ ᴀᴋᴛиʙиᴩоʙᴀн ᴩᴇжиʍ ᴨоᴧной зᴀщиᴛы оᴛ ᴀʙᴛоʍᴀᴛичᴇᴄᴋих ᴀᴛᴀᴋ (ʟᴏᴄᴋᴅᴏᴡɴ).\n"
+                        "доᴄᴛуᴨ ᴋ ᴛᴇᴋᴄᴛоʙыʍ чᴀᴛᴀʍ ʙᴩᴇʍᴇнно оᴦᴩᴀничᴇн. ᴨожᴀᴧуйᴄᴛᴀ, ожидᴀйᴛᴇ ʙᴇᴩиɸиᴋᴀции ᴀдʍиниᴄᴛᴩᴀциᴇй."
+                    ),
+                    color=discord.Color.brand_red(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                if member.guild.icon:
+                    dm_embed.set_footer(text=member.guild.name, icon_url=member.guild.icon.url)
+                try:
+                    await safe_dm_send(member.id, embed=dm_embed)
+                except Exception:
+                    pass
+
+                # Логируем изоляцию рейда
+                log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get("emergency_logs"))
+                if log_channel:
+                    embed_quarantine_log = discord.Embed(
+                        title="<:owneremoji:1517494149119611063> ᴨᴩоᴛоᴋоᴧ: ʟᴏᴄᴋᴅᴏᴡɴ",
+                        description=f"ᴨоᴧьзоʙᴀᴛᴇᴧь {member.mention} ᴀʙᴛоʍᴀᴛичᴇᴄᴋи изоᴧиᴩоʙᴀн ʙо ʙᴩᴇʍя ϶ᴋᴄᴛᴩᴇнноᴦо ᴩᴇжиʍᴀ.",
+                        color=discord.Color.dark_orange(),
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    embed_quarantine_log.add_field(name="<:hazardemoji:1526566003339821207> учᴀᴄᴛниᴋ", value=f"{member.mention}")
+                    if member.display_avatar:
+                        embed_quarantine_log.set_thumbnail(url=member.display_avatar.url)
+                    if member.guild.icon:
+                        embed_quarantine_log.set_footer(text=member.guild.name, icon_url=member.guild.icon.url)
+                    await safe_send(log_channel, embed=embed_quarantine_log)
+            return
+
+        # ==================== ЧАСТЫЕ ПЕРЕЗАХОДЫ ПОЛЬЗОВАТЕЛЕЙ ====================
+        if member.id not in self.join_tracker:
+            self.join_tracker[member.id] = []
+
+        self.join_tracker[member.id] = [
+            t
+            for t in self.join_tracker[member.id]
+            if (now - t).total_seconds() < 1200
+        ]
+        self.join_tracker[member.id].append(now)
+
+        recent_joins = len(self.join_tracker[member.id])
+
+        if recent_joins >= 4:
+            log_channel = await safe_fetch_channel(
+                self.bot, BotConfig.CHANNELS.get("warning_logs")
+            )
+            if log_channel:
+                embed_log = discord.Embed(
+                    title="<:warningemoji:1515756604178305054> ᴨодозᴩиᴛᴇᴧьнᴀя ᴀᴋᴛиʙноᴄᴛь",
+                    description="зᴀɸиᴋᴄиᴩоʙᴀны чᴀᴄᴛыᴇ ᴨᴇᴩᴇзᴀходы нᴀ ᴄᴇᴩʙᴇᴩ (возможный рейд).",
+                    color=discord.Color.dark_orange(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+
+                embed_log.add_field(
+                    name="<:forbbiden2emoji:1517479332866429008> учᴀᴄᴛниᴋ",
+                    value=f"{member.mention}",
+                    inline=True,
+                )
+
+                embed_log.add_field(
+                    name="<:pencilemoji:1525177241749950464> ᴄᴛᴀᴛиᴄᴛиᴋᴀ",
+                    value=f"**{recent_joins}** входов за **20 мин.**",
+                    inline=True,
+                )
+
+                embed_log.add_field(
+                    name="<:verifiedemoji:1525207492928213204> дᴇйᴄᴛʙиᴇ",
+                    value="<:banemoji:1515689296118677534> **Автоматический бан**",
+                    inline=False,
+                )
+
+                if member.display_avatar:
+                    embed_log.set_thumbnail(url=member.display_avatar.url)
+
+                if member.guild.icon:
+                    embed_log.set_footer(text=member.guild.name, icon_url=member.guild.icon.url)
+
+                await safe_send(log_channel, embed=embed_log)
+            try:
+                await member.ban(
+                    reason="Подозрительная активность (частые перезаходы)",
+                    delete_message_days=1,)
+                return
+            except Exception as e:
+                print(f"⚠️ Ошибка бана за частые перезаходы: {e}")
+
+        # ==================== ЛОГИКА КАРАНТИНА НОВЫХ АККАУНТОВ ====================
+        account_age = int((datetime.now(timezone.utc) - member.created_at).days)
+        if account_age < 7:
+            # 📌 Запоминаем ID пользователя, что он в карантине
+            self.quarantined_users.add(member.id)
+
+            quarantine_role = member.guild.get_role(self.quarantine_role_id)
+
+            if quarantine_role:
+                try:
+                    await member.add_roles(
+                        quarantine_role, reason=f"Новый аккаунт ({account_age} дн.)"
+                    )
+                except Exception as e:
+                    print(f"⚠️ Ошибка выдачи роли карантина: {e}")
+
+            # Отправляем ЛС
+            dm_embed = discord.Embed(
+                title="<:warningemoji:1515756604178305054> ʙᴀɯ ᴀᴋᴋᴀунᴛ нᴀ ᴨᴩоʙᴇᴩᴋᴇ",
+                description=(
+                    "ʙᴀɯ ᴀᴋᴋᴀунᴛ ʍᴧᴀдɯᴇ 7 днᴇй. ʙᴀʍ ʙыдᴀнᴀ ᴩоᴧь ᴋᴀᴩᴀнᴛинᴀ.\nожидᴀйᴛᴇ,"
+                    " ᴨоᴋᴀ ᴀдʍиниᴄᴛᴩᴀция ᴨᴩоʙᴇᴩиᴛ ʙᴀᴄ"
+                ),
+                color=discord.Color.orange(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            if member.display_avatar:
+                dm_embed.set_thumbnail(url=member.display_avatar.url)
+            if member.guild.icon:
+                dm_embed.set_footer(
+                    text="𝐅𝐈𝐆𝐇𝐓 𝐂𝐋𝐔𝐁", icon_url=member.guild.icon.url
+                )
+
+            try:
+                await safe_dm_send(member.id, embed=dm_embed)
+            except Exception:
+                pass
+
+            # Лог модераторам
+            log_channel = await safe_fetch_channel(
+                self.bot, BotConfig.CHANNELS.get("warning_logs")
+            )
+            if log_channel:
+                embed_quarantine = discord.Embed(
+                    title="<:hazardemoji:1526566003339821207> ᴨоʍᴇщᴇн ʙ ᴋᴀᴩᴀнᴛин",
+                    description="обнᴀᴩужᴇн ноʙый ᴀᴋᴋᴀунᴛ. доᴄᴛуᴨ ᴋ ᴄᴇᴩʙᴇᴩу ʙᴩᴇʍᴇнно оᴦᴩᴀничᴇн.",
+                    color=discord.Color.dark_red(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+
+                embed_quarantine.add_field(
+                    name="<:warningemoji:1515756604178305054> учᴀᴄᴛниᴋ",
+                    value=f"{member.mention}",
+                    inline=True,
+                )
+
+                embed_quarantine.add_field(
+                    name="<:pencilemoji:1525177241749950464> ʙозᴩᴀᴄᴛ ᴀᴋᴋᴀунᴛᴀ",
+                    value=f"**{account_age}** дн.",
+                    inline=True,
+                )
+
+                embed_quarantine.add_field(
+                    name="<:owneremoji:1517494149119611063> инᴄᴛᴩуᴋция дᴧя ʙᴇᴩиɸиᴋᴀции",
+                    value=f"Используйте команду:\n`/верифицировать member:{member.id}`",
+                    inline=False,
+                )
+
+                if member.display_avatar:
+                    embed_quarantine.set_thumbnail(url=member.display_avatar.url)
+
+                if member.guild.icon:
+                    embed_quarantine.set_footer(
+                        text=member.guild.name, icon_url=member.guild.icon.url)
+
+                await safe_send(log_channel, embed=embed_quarantine)
+            return
+
+        # ==================== ЛОГИКА ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ ====================
+        await commands_func.get_base_roles(member=member)
+
+    # =========================================================================
+    # СОБЫТИЯ СООБЩЕНИЙ (ЕДИНАЯ ПРОВЕРКА)
+    # =========================================================================
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not message.guild or message.author.bot:
+            return
+
+        # Игнорируем администраторов и техподдержку
+        if message.author.guild_permissions.administrator:
+            return
+
+        support_roles = BotConfig.SUPPORT_ROLES.get("second_order", []) + BotConfig.SUPPORT_ROLES.get("third_order", [])
+        if any(role.id in support_roles for role in getattr(message.author, 'roles', [])):
+            return
+
+        violation_type = None
+        log_detail = ""
+
+        # 1. Проверка запрещённых слов (экспорт токенов/спам фразы)
+        if self.is_blocked(message.content):
+            violation_type = "запрещенный текст"
+            log_detail = "`" + message.content.replace('\n', ' ')[:50] + "`"
+
+        # 2. Проверка массовых упоминаний
+        if not violation_type:
+            user_mentions = len(message.mentions)
+            role_mentions = len(message.role_mentions)
+            text_mentions = len(re.findall(r'@\S+', message.content))
+            id_mentions = len(re.findall(r'<@!?\d+>', message.content))
+            
+            if (user_mentions + role_mentions + text_mentions + id_mentions) >= 3:
+                violation_type = "массовые упоминания"
+                log_detail = "`" + message.content.replace('\n', ' ')[:25] + "`"
+
+        # 3. Проверка сторонних ссылок
+        if not violation_type:
+            urls = self.url_pattern.findall(message.content)
+            if urls:
+                allowed_domains = getattr(BotConfig, 'allowed_domains', [])
+                if any(not any(domain in url for domain in allowed_domains) for url in urls):
+                    violation_type = "запрещенные ссылки"
+                    log_detail = f"`{urls[0]}`"
+
+        # Если обнаружено любое нарушение в сообщении
+        if violation_type:
+            BotConfig.deleted_by_bot.add(message.id)
+            await safe_delete(message)
+            
+            # Начисляем 1 предупреждение в единую систему
+            warn_count = self._add_message_warning(message.author.id)
+            user_mention = message.author.mention
+
+            if warn_count == 4:
+                try:
+                    await commands_func.kick_func(message.channel, member=message.author, rule="П. 3.3 (Вредоносные ссылки)", reason="Подозрительный формат")
+                    log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('mod_logs_commands'))
+                    if log_channel:
+                        await safe_send(
+                            log_channel,
+                            f"<:kickemoji:1515693208783425617> **{user_mention} выгнан(а) зᴀ 4 ᴨᴩᴇдуᴨᴩᴇждᴇния ʙ чате (последнее: {violation_type})**"
+                        )
+                except Exception as e:
+                    print(f"⚠️ Ошибка бана за нарушения в чате: {e}")
+            if warn_count == 5:
+                try:
+                    await commands_func.ban_func(message.channel, member=message.author, rule="П. 3.3 (Вредоносные ссылки)", reason="Многочисленный подозрительный формат")
+                    log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('mod_logs_commands'))
+                    if log_channel:
+                        await safe_send(
+                            log_channel,
+                            f"<:neutralizeemoji:1515694760990347325> **{user_mention} нᴇйᴛᴩᴀᴧизоʙᴀн(а) зᴀ 5 ᴨᴩᴇдуᴨᴩᴇждᴇния ʙ чате (последнее: {violation_type})**"
+                        )
+                except Exception as e:
+                    print(f"⚠️ Ошибка бана за нарушения в чате: {e}")
+            else:
+                await safe_send(
+                    message.channel,
+                    f"<:forbiddenemoji:1515780232404144279> {user_mention}, ϶ᴛо зᴀᴨᴩᴇщᴇно! Предупреждений: ({warn_count}/5)",
+                    delete_after=5
+                )
+
+            # Логирование нарушения
+            log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('warning_logs'))
+            if log_channel:
+                # Создаем стильный Embed золотого цвета для предупреждений
+                embed_violation = discord.Embed(
+                    title="<:warningemoji:1515756604178305054> Нарушение в чате",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now(timezone.utc))
+
+                # Добавляем информацию о нарушителе
+                # Примечание: предполагается, что у вас есть доступ к объекту member/user для ID и аватарки
+                embed_violation.add_field(
+                    name="<:forbbiden2emoji:1517479332866429008> нᴀᴩуɯиᴛᴇᴧь",
+                    value=f"{user_mention}",
+                    inline=True
+                )
+
+                # Добавляем тип нарушения
+                embed_violation.add_field(
+                    name="<:binemoji:1525176536607752202> ᴛиᴨ нᴀᴩуɯᴇния",
+                    value=f"**{violation_type}**",
+                    inline=True
+                )
+
+                # Безопасно обрезаем детали нарушения до 1000 символов, чтобы не превысить лимиты Discord
+                safe_detail = log_detail if len(log_detail) < 1000 else f"{log_detail[:990]}..."
+                embed_violation.add_field(
+                    name="<:pencilemoji:1525177241749950464> дᴇᴛᴀᴧи нᴀᴩуɯᴇния",
+                    value=f"```\n{safe_detail}```",
+                    inline=False
+                )
+
+                # Если в коде доступен объект сообщения, можно прикрепить ссылку на него и указать канал
+                if 'message' in locals() and message:
+                    embed_violation.add_field(
+                        name="<:clearemoji:1515691240476377218> ᴋонᴛᴇᴋᴄᴛ",
+                        value=f"Канал: {message.channel.mention}\n[Перейти к сообщению]({message.jump_url})",
+                        inline=False
+                    )
+                    # Устанавливаем аватарку автора в превью лога
+                    if message.author.display_avatar:
+                        embed_violation.set_thumbnail(url=message.author.display_avatar.url)
+
+                # Оформляем футер с иконкой сервера
+                if 'message' in locals() and message.guild and message.guild.icon:
+                    embed_violation.set_footer(
+                        text=message.guild.name, 
+                        icon_url=message.guild.icon.url)
+
+                # Отправляем оформленный лог в канал
+                try:
+                    await safe_send(log_channel, embed=embed_violation)
+                except Exception as e:
+                    print(f"❌ Не удалось отправить лог нарушения: {e}")
+
+# Фильтр матов
+# class ProfanityFilter(commands.Cog):
+#     def __init__(self, bot):
+#         self.bot = bot
+#         self.warnings = {}
+#         self.messages_count = {}
+
+#         # Базовые корни и основы слов для поиска
+#         self.base_words = [
+#             # Оскорбления внешности / личности
+#             "жиробас", "жирдяй", "жирна", "жирно",
+#             "мудак", "мудил", "мудач", "мудел", "мудело",
+#             "урод", "мразь", "тварь", "отсталы", "сосунок", "гандон",
+
+#             # Нецензурные корни и их искажения
+#             "хуесос", "хуэсос", "хуисос", "ху1сос",
+#             "долбоеб", "долбоиб", "долбаеб", "долбаиб",
+#             "ебал", "ибал", "ебало", "ебан", "уебан",
+#             "пидор", "педор", "пидорас", "педорас", "пидрил", "педрил",
+#             "шлюх", "блядин", "бляден", "блядотин", "курв", "проститутка",
+#             "сукин", "сучар", "ублюдок", "хуйн", "лесби", "лезби",
+
+#             # Англоязычные
+#             "fuck", "shit", "bitch", "asshole", "bastard", "dick", "cunt"
+#         ]
+
+#         # Настройки
+#         self.max_messages_before_warn = 4
+#         self.warning_reset_minutes = 10
+#         self.ignore_role_ids = BotConfig.SUPPORT_ROLES.get('second_order', []) + BotConfig.SUPPORT_ROLES.get('third_order', [])
+
+#         # Генерация паттернов
+#         self.patterns = self._generate_patterns()
+
+#         # Запуск фоновой задачи очистки
+#         self.bot.loop.create_task(self._auto_reset_warnings())
+
+#     def _generate_patterns(self):
+#         patterns = []
+
+#         # Завуалированные фразовые проверки
+#         extra_patterns = [
+#             re.compile(r'сын\s+хорош(ей|еи)\s+матер(и|е)', re.IGNORECASE),
+#             re.compile(r'f[\s.,!?;:()\−]*[uу][\s.,!?;:()\−]*c[\s.,!?;:()\−]*k', re.IGNORECASE),
+#             re.compile(r's[\s.,!?;:()\−]*h[\s.,!?;:()\−]*[i1][\s.,!?;:()\−]*t', re.IGNORECASE),
+#             re.compile(r'b[\s.,!?;:()\−]*[i1][\s.,!?;:()\−]*t[\s.,!?;:()\−]*c[\s.,!?;:()\−]*h', re.IGNORECASE),
+#             re.compile(r'a[\s.,!?;:()\−]*s[\s.,!?;:()\−]*s[\s.,!?;:()\−]*h[\s.,!?;:()\−]*o[\s.,!?;:()\−]*l[\s.,!?;:()\−]*e', re.IGNORECASE),
+#         ]
+
+#         patterns.extend(extra_patterns)
+#         return patterns
+
+#     @staticmethod
+#     def _clean_char_map() -> dict:
+#         return {
+#             # А
+#             'a': 'а', '@': 'а', '4': 'а', 'а́': 'а', 'α': 'а', 'ä': 'а', 'а': 'а',
+#             # Б
+#             'b': 'б', '6': 'б', 'б': 'б',
+#             # В
+#             'v': 'в', 'w': 'в', 'в': 'в',
+#             # Г
+#             'g': 'г', 'г': 'г',
+#             # Д
+#             'd': 'д', 'д': 'д',
+#             # Е / Ё / Э
+#             'e': 'е', '3': 'е', 'ё': 'е', 'э': 'е', 'е́': 'е', 'є': 'е', '3́': 'е', 'е': 'е',
+#             # Ж
+#             'zh': 'ж', 'ж': 'ж',
+#             # З
+#             'z': 'з', 'з': 'з',
+#             # И / Й
+#             'i': 'и', '1': 'и', '!': 'и', '|': 'и', 'j': 'и', 'й': 'и', 'и́': 'и', 'ы': 'и', 'и': 'и',
+#             # К
+#             'k': 'к', 'к': 'к',
+#             # Л
+#             'l': 'л', 'л': 'л',
+#             # М
+#             'm': 'м', 'µ': 'м', 'м': 'м',
+#             # Н
+#             'n': 'н', 'н': 'н',
+#             # О
+#             'o': 'о', '0': 'о', 'о́': 'о', 'ö': 'о', 'о': 'о',
+#             # П
+#             'p': 'п', 'п': 'п',
+#             # Р
+#             'r': 'р', 'р': 'р',
+#             # С
+#             's': 'с', 'c': 'с', '$': 'с', 'с': 'с',
+#             # Т
+#             't': 'т', '7': 'т', '+': 'т', 'т': 'т',
+#             # У
+#             'u': 'у', 'y': 'у', 'у́': 'у', 'у': 'у',
+#             # Ф
+#             'f': 'ф', 'ф': 'ф',
+#             # Х
+#             'h': 'х', 'x': 'х', 'х': 'х',
+#             # Ц
+#             'ts': 'ц', 'ц': 'ц',
+#             # Ч
+#             'ch': 'ч', 'ч': 'ч',
+#             # Ш / Щ
+#             'sh': 'ш', 'sch': 'щ', 'ш': 'ш', 'щ': 'щ',
+#             # Ъ / Ь
+#             'b': 'ь', 'ь': 'ь', 'ъ': 'ь'
+#         }
+
+#     @classmethod
+#     def normalize_text(cls, text: str) -> tuple[str, list[str]]:
+#         # 1. Удаление невидимых спецсимволов Unicode
+#         text = re.sub(r'[\u200B-\u200D\uFEFF]', '', text)
+
+#         # 2. Приведение к нижнему регистру и NFKC нормализации
+#         text = unicodedata.normalize('NFKC', text.lower())
+
+#         char_map = cls._clean_char_map()
+
+#         # 3. Полная замена каждого символа по карте (буквы, цифры, знаки)
+#         cleaned_chars = [char_map.get(c, c) for c in text]
+#         cleaned_text = "".join(cleaned_chars)
+
+#         # 4. Обработка списка отдельных слов
+#         words = cleaned_text.split()
+#         normalized_words = []
+#         for word in words:
+#             # Оставляем только буквы кириллицы/латиницы
+#             clean_word = re.sub(r'[^а-яa-z]', '', word)
+#             # Схлопываем повторы букв подряд (например, "ппееддоорр" -> "педор")
+#             collapsed_word = re.sub(r'(.)\1+', r'\1', clean_word)
+#             if collapsed_word:
+#                 normalized_words.append(collapsed_word)
+
+#         # 5. Склеивание всего текста в одну строку (для ловли "х.у.1.с.о.с" или "х у 1 с о с")
+#         all_words_only = re.sub(r'[^а-яa-z]', '', cleaned_text)
+#         collapsed_full_text = re.sub(r'(.)\1+', r'\1', all_words_only)
+
+#         return collapsed_full_text, normalized_words
+
+#     @commands.Cog.listener()
+#     async def on_message(self, message: discord.Message):
+#         if not message.guild or message.author.bot:
+#             return
+
+#         # Игнорирование администраторов
+#         if getattr(message.author, 'guild_permissions', None) and message.author.guild_permissions.administrator:
+#             return
+
+#         # Игнорирование ролей поддержки
+#         if hasattr(message.author, 'roles') and self.ignore_role_ids:
+#             if any(r.id in self.ignore_role_ids for r in message.author.roles):
+#                 return
+
+#         raw_content = message.content.lower()
+#         collapsed_text, normalized_words = self.normalize_text(message.content)
+
+#         # Проверка 1: Завуалированные фразы по исходному тексту
+#         matched = [p.pattern for p in self.patterns if p.search(raw_content)]
+
+#         # Проверка 2: Поиск корней в склеенном и пословесном тексте
+#         if not matched:
+#             for word in self.base_words:
+#                 if word in collapsed_text:
+#                     matched.append(word)
+#                     break
+#                 if any(word in norm_word for norm_word in normalized_words):
+#                     matched.append(word)
+#                     break
+
+#         if matched:
+#             await self._handle_profanity(message, matched)
+
+#     async def _handle_profanity(self, message: discord.Message, matched: list):
+#         user = message.author
+#         now = datetime.now()
+
+#         if 'deleted_by_bot' in globals():
+#             BotConfig.deleted_by_bot.add(message.id)
+
+#         self._clean_old_messages(user.id)
+
+#         if user.id not in self.messages_count:
+#             self.messages_count[user.id] = {
+#                 "count": 0,
+#                 "first_time": now,
+#                 "messages": []
+#             }
+
+#         clean_text = message.content.replace('\n', ' ')[:50]
+#         self.messages_count[user.id]["count"] += 1
+#         self.messages_count[user.id]["messages"].append({
+#             "timestamp": now,
+#             "content": clean_text,
+#             "matched": matched[:3]
+#         })
+
+#         # Удаляем сообщение с нарушением
+#         await safe_delete(message)
+
+#         current_count = self.messages_count[user.id]["count"]
+#         fake_interaction = self._create_fake_interaction(message)
+
+#         # Выдача варна при достижении лимита
+#         if current_count >= self.max_messages_before_warn:
+#             self.messages_count[user.id] = {
+#                 "count": 0,
+#                 "first_time": datetime.now(),
+#                 "messages": []
+#             }
+
+#             await commands_func.warn_func(
+#                 fake_interaction,
+#                 user,
+#                 "Вы слишком часто используете запрещенный сленг/мат"
+#             )
+#         else:
+#             await safe_send(
+#                 fake_interaction,
+#                 content=(
+#                     f"<:clearemoji:1515691240476377218> **{user.mention}, ʙ ʙᴀɯᴇʍ ᴄообщᴇнии зᴀᴨᴩᴇщᴇнный ᴄᴧᴇнᴦ.**\n"
+#                     f"<:warningemoji:1515756604178305054> оᴄᴛᴀᴧоᴄь до ʙᴀᴩнᴀ: {current_count}/{self.max_messages_before_warn}"
+#                 ),
+#                 delete_after=5
+#             )
+
+#     def _clean_old_messages(self, user_id: int):
+#         if user_id not in self.messages_count:
+#             return
+
+#         cutoff = datetime.now() - timedelta(minutes=self.warning_reset_minutes)
+
+#         if self.messages_count[user_id]["first_time"] < cutoff:
+#             self.messages_count[user_id] = {
+#                 "count": 0,
+#                 "first_time": datetime.now(),
+#                 "messages": []
+#             }
+
+#     def _create_fake_interaction(self, message: discord.Message):
+#         class FakeInteraction:
+#             def __init__(self, bot_member, guild, channel, message_id):
+#                 self.user = bot_member
+#                 self.guild = guild
+#                 self.channel = channel
+#                 self.id = message_id
+#                 self.created_at = datetime.now()
+#                 self.response = None
+
+#         bot_member = message.guild.me if message.guild else self.bot.user
+
+#         return FakeInteraction(
+#             bot_member=bot_member,
+#             guild=message.guild,
+#             channel=message.channel,
+#             message_id=message.id
+#         )
+
+#     async def _auto_reset_warnings(self):
+#         await self.bot.wait_until_ready()
+
+#         while not self.bot.is_closed():
+#             await asyncio.sleep(60)
+
+#             now = datetime.now()
+#             cutoff = now - timedelta(minutes=self.warning_reset_minutes)
+
+#             for user_id, data in list(self.messages_count.items()):
+#                 if data["first_time"] < cutoff:
+#                     self.messages_count[user_id] = {
+#                         "count": 0,
+#                         "first_time": now,
+#                         "messages": []
+#                     }
+
+class RolePermissionDetector(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # Список прав, которые считаются критически опасными для обычных ролей
+        self.dangerous_permissions = [
+            'administrator',
+            'manage_guild',
+            'manage_roles',
+            'manage_webhooks',
+            'mention_everyone',
+            'kick_members',
+            'ban_members',
+            'manage_channels',      
+            'manage_expressions',   
+            'moderate_members'      
+        ]
+        
+        # НАСТРОЙКА МЕЖСЕРВЕРНОЙ ПЕРЕДАЧИ
+        self.source_guild_id = BotConfig.GUILD_ID  # ЗАМЕНИТЕ на ID сервера-источника (который сканируем)
+        self.log_channel_id = BotConfig.CHANNELS.get("tech_logs")   # ЗАМЕНИТЕ на ID канала на сервере-получателе (куда слать логи)
+
+        # Запуск фонового сканирования каждые 60 минут
+        self.audit_roles_task.start()
+
+    def cog_unload(self):
+        self.audit_roles_task.cancel()
+
+    def check_dangerous_permissions(self, role: discord.Role):
+        """Проверяет роль на наличие опасных прав."""
+        found_dangerous = []
+        for perm, value in role.permissions:
+            if perm in self.dangerous_permissions and value is True:
+                found_dangerous.append(perm)
+        return found_dangerous
+
+    @tasks.loop(minutes=60)
+    async def audit_roles_task(self):
+        """Фоновое сканирование ролей на конкретном сервере."""
+        await self.bot.wait_until_ready()
+        
+        # Находим целевой сервер-источник
+        guild = self.bot.get_guild(self.source_guild_id)
+        if not guild:
+            print(f"❌ Не удалось найти сервер-источник с ID {self.source_guild_id}. Убедитесь, что бот присутствует на нем.")
+            return
+
+        # Сканируем роли только на найденном сервере-источнике
+        for role in guild.roles:
+            if role.is_default():  # @everyone
+                # Для @everyone проверяем только самые критичные права
+                everyone_danger = [p for p in ['administrator', 'mention_everyone', 'manage_roles'] if getattr(role.permissions, p)]
+                if everyone_danger:
+                    await self.notify_danger(guild, role, everyone_danger, is_everyone=True)
+                continue
+
+            # Проверяем обычные роли (пропускаем роли интеграций/ботов)
+            if role.is_bot_managed() or role.is_integration():
+                continue
+
+            dangerous_perms = self.check_dangerous_permissions(role)
+            # Если роль не должна обладать правами администратора, но имеет опасные права
+            if dangerous_perms and not role.permissions.administrator:
+                # Исключаем доверенные роли модераторов (берем из конфига)
+                trusted_role_ids = BotConfig.SUPPORT_ROLES.get("third_order", [])
+                if role.id not in trusted_role_ids:
+                    await self.notify_danger(guild, role, dangerous_perms)
+
+    async def notify_danger(self, guild, role, dangerous_perms, is_everyone=False):
+        """Отправка уведомления об обнаружении опасных прав на другой сервер."""
+        # Получаем канал логирования напрямую по его глобальному ID (работает между серверами)
+        log_channel = self.bot.get_channel(self.log_channel_id)
+        if not log_channel:
+            try:
+                log_channel = await self.bot.fetch_channel(self.log_channel_id)
+            except Exception as e:
+                print(f"❌ Не удалось получить межсерверный канал логирования с ID {self.log_channel_id}: {e}")
+                return
+
+        formatted_perms = ", ".join([f"`{p}`" for p in dangerous_perms])
+        
+        embed = discord.Embed(
+            title="<:warningemoji:1515756604178305054> обнᴀᴩужᴇны оᴨᴀᴄныᴇ ᴨᴩᴀʙᴀ у ᴩоᴧи!",
+            description=(
+                f"у ᴩоᴧи **{role.name}** на сервере **{guild.name}** обнаружены опасные привилегии.\n"
+                f"`обнᴀᴩужᴇнныᴇ ᴨᴩᴀʙᴀ`: {formatted_perms}"
+            ) if not is_everyone else (
+                f"<:redalertemoji:1526209446026678413> **ᴋᴩиᴛичᴇᴄᴋᴀя уᴦᴩозᴀ:** у стандартной роли `@everyone` на сервере **{guild.name}** активны опасные права: {formatted_perms}!\n"
+                f"Любой зашедший на тот сервер пользователь может использовать их!"
+            ),
+            color=discord.Color.brand_red() if is_everyone else discord.Color.dark_orange(),
+            timestamp=datetime.now(timezone.utc)
         )
         
-        # Сообщаем пользователю (скрыто в системном окне), что чат создан
-        await safe_send(interaction, f"Приватный чат успешно создан: {ticket_channel.mention}", ephemeral=True)
+        # Поскольку role.mention не будет отображаться корректно (не будет кликабельным) на другом сервере,
+        # мы отправляем текстовое имя роли и ее ID для удобства модераторов
+        embed.add_field(name="<:rolesemoji:1517494151086866522> ᴩоᴧь", value=f"**{role.name}**`", inline=True)
+        embed.add_field(name="<:successemoji:1515691944460685372> иᴄᴛочниᴋ", value=f"Сервер: **{guild.name}**", inline=True)
+        
+        if guild.icon:
+            embed.set_footer(text=guild.name, icon_url=guild.icon.url)
 
-# --- 3. Кнопка «Открыть тикет» на главной панели ---
-class DynamicUserView(discord.ui.View):
-    def __init__(self, custom_id: str):
-        super().__init__(timeout=None)
-        self.open_ticket_btn.custom_id = custom_id
+        await safe_send(log_channel, embed=embed)
 
-    @discord.ui.button(label="оᴛᴋᴩыᴛь ᴛиᴋᴇᴛ", style=discord.ButtonStyle.green)
-    async def open_ticket_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        fields = PANEL_CONFIGS.get(button.custom_id)
-        if not fields:
-            await safe_send(interaction, "Ошибка: Настройки панели сброшены.", ephemeral=True)
-            return
-        await interaction.response.send_modal(DynamicUserModal(title="Заполнение тикета", fields_list=fields))
+    @audit_roles_task.before_loop
+    async def before_audit(self):
+        await self.bot.wait_until_ready()                  
 
-# --- 4. Конструктор панели для администратора ---
-class AdminSetupModal(discord.ui.Modal, title="Конструктор анкеты тикетов"):
-    panel_text = discord.ui.TextInput(
-        label="Текст над кнопкой в чате",
-        style=discord.TextStyle.paragraph,
-        max_length=500
-    )
-    fields_input = discord.ui.TextInput(
-        label="Названия строк (ЧЕРЕЗ ЗАПЯТУЮ, МАКСИМУМ 5)",
-        placeholder="Имя, Возраст, Ваш вопрос, Игровой ник, Дискорд",
-        style=discord.TextStyle.paragraph,
-        max_length=250
-    )
+class AntiWebhook(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # Белый список ID пользователей, которым разрешено создавать вебхуки
+        self.allowed_creators = BotConfig.SUPPORT_ROLES.get("third_order", [])
+        # FIFO-список для хранения ID уже обработанных событий аудита (чтобы избежать дубликатов)
+        self.processed_actions = []
 
-    def __init__(self, channel: discord.TextChannel):
-        super().__init__()
-        self.channel = channel
-
-    async def on_submit(self, interaction: discord.Interaction):
-        # Парсим вопросы через запятую
-        raw_fields = self.fields_input.value.split(",")
-        fields = [f.strip() for f in raw_fields if f.strip()]
-
-        if not fields:
-            await safe_send(interaction, "Укажите хотя бы один вопрос!", ephemeral=True)
+    @commands.Cog.listener()
+    async def on_webhooks_update(self, channel: discord.TextChannel):
+        """Срабатывает при любом изменении вебхуков в текстовом канале."""
+        guild = channel.guild
+        
+        # Проверяем права бота на управление вебхуками на сервере
+        if not guild.me.guild_permissions.view_audit_log or not guild.me.guild_permissions.manage_webhooks:
             return
 
-        if len(fields) > 5:
-            await safe_send(interaction, "В одном окне Discord поддерживает строго до 5 строк! Сократите количество вопросов.", ephemeral=True)
-            return
+        try:
+            # Получаем последнее действие создания вебхука из Audit Log
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.webhook_create, limit=1):
+                creator = entry.user
+                webhook_target = entry.target # Объект созданного вебхука
 
-        panel_id = f"ticket_panel_{interaction.id}"
-        PANEL_CONFIGS[panel_id] = fields
+                # Если создатель — сам бот, игнорируем
+                if creator.id == self.bot.user.id:
+                    return
 
-        embed = discord.Embed(
-            title="<:warnemoji:1515687856549658774> ᴄоздᴀᴛь обᴩᴀщᴇниᴇ",
-            description=self.panel_text.value,
-            color=discord.Color.darker_grey()
-        )
-        await safe_send(self.channel, embed=embed, view=DynamicUserView(custom_id=panel_id))
-        await safe_send(interaction, "Панель успешно создана!", ephemeral=True)
+                # ПРОВЕРКА НА ДУБЛИКАТЫ: если это событие уже обрабатывалось, выходим
+                if entry.id in self.processed_actions:
+                    return
+
+                # Проверяем, находится ли создатель в белом списке
+                if creator.id not in self.allowed_creators:
+                    # Вносим ID действия в список обработанных, чтобы предотвратить спам-триггер
+                    self.processed_actions.append(entry.id)
+                    
+                    # Запускаем отложенное удаление ID из списка через 10 секунд
+                    async def remove_from_cache(action_id):
+                        await asyncio.sleep(10)
+                        if action_id in self.processed_actions:
+                            self.processed_actions.remove(action_id)
+                            
+                    asyncio.create_task(remove_from_cache(entry.id))
+
+                    # Находим и удаляем этот вебхук
+                    webhooks = await channel.webhooks()
+                    for webhook in webhooks:
+                        if webhook.id == webhook_target.id:
+                            await webhook.delete(reason=f"Несанкционированное создание вебхука пользователем {creator.name}")
+                            
+                            await self.punish_creator(guild, creator, channel)
+                            break
+        except discord.Forbidden:
+            print(f"❌ Нет прав доступа к Audit Logs или Webhooks на сервере {guild.name}.")
+        except Exception as e:
+            print(f"❌ Ошибка в системе Anti-Webhook: {e}")
+
+    async def punish_creator(self, guild, member, channel):
+        """Наказание за несанкционированное создание вебхука."""
+        if isinstance(member, discord.Member) and not member.guild_permissions.administrator:
+            try:
+                # Даем таймаут на 2 часа (120 минут) за попытку саботажа
+                await member.timeout(timedelta(minutes=120), reason="Попытка создания вебхука без разрешения (Anti-Nuke)")
+                
+                # Сообщение в чат (текст остался без изменений)
+                await safe_send(
+                    channel, 
+                    f"<:verifiedemoji:1525207492928213204> **ᴄиᴄᴛᴇʍᴀ ᴀɴᴛɪ-ɴᴜᴋᴇ:** ᴨоᴨыᴛᴋᴀ ᴄоздᴀния ʙᴇбхуᴋᴀ ᴨоᴧьзоʙᴀᴛᴇᴧᴇʍ {member.mention} зᴀбᴧоᴋиᴩоʙᴀнᴀ.\nʙᴇбхуᴋ удᴀᴧᴇн, нᴀᴩуɯиᴛᴇᴧю ʙыдᴀн ᴛᴀйʍᴀуᴛ.",
+                    delete_after=15
+                )
+            except Exception as e:
+                print(f"⚠️ Не удалось наказать нарушителя {member.id}: {e}")
+
+            # Логирование события (embed остался без изменений)
+            log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('tech_logs'))
+            if log_channel:
+                embed_log = discord.Embed(
+                    title="<:redalertemoji:1526209446026678413> нᴇᴄᴀнᴋциониᴩоʙᴀнный ʙᴇбхуᴋ удᴀᴧᴇн",
+                    description=f"ᴨоᴨыᴛᴀᴧᴄя ᴄоздᴀᴛь ʙᴇбхуᴋ ʙ ᴋᴀнᴀᴧᴇ {channel.mention}.",
+                    color=discord.Color.brand_red(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                embed_log.add_field(name="<:smileemoji:1526114626557706252> нᴀᴩуɯиᴛᴇᴧь", value=f"{member.mention}", inline=True)
+                embed_log.add_field(name="<:verifiedemoji:1525207492928213204> дᴇйᴄᴛʙиᴇ зᴀщиᴛы", value="Вебхук уничтожен, выдан таймаут на 120 мин.", inline=True)
+                
+                if guild.icon:
+                    embed_log.set_footer(text=guild.name, icon_url=guild.icon.url)
+                    
+                await safe_send(log_channel, embed=embed_log)
 
 class TempVoice(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.temp_channels = set()
+        self.muted_role_id = BotConfig.ROLES.get("muted")
+        
+        # Блокировка от гонки запросов при создании
+        self._creation_lock = asyncio.Lock()
+        self._creating_users = set()
+
+    def is_temp_channel(self, channel: discord.abc.GuildChannel) -> bool:
+        if not isinstance(channel, discord.VoiceChannel):
+            return False
+        if channel.id == BotConfig.CHANNELS['trigger_voice']:
+            return False
+        if channel.category_id != BotConfig.CATEGORIES['temp_voices']:
+            return False
+            
+        # Проверка по ID в памяти или специфичному форматированию названия
+        return channel.id in self.temp_channels or channel.name.endswith("𝙘𝙝𝙖𝙣𝙣𝙚𝙡") or "╠" in channel.name
 
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member, before, after):
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         if member.bot:
             return
-        if after.channel is None:
+
+        # 1. Если игрок вышел или перешел из одного канала в другой
+        if before.channel != after.channel:
+            if before.channel and self.is_temp_channel(before.channel):
+                await self.check_and_delete_channel(before.channel)
+
+        # 2. Если игрок зашел в триггерный канал
+        if after.channel and after.channel.id == BotConfig.CHANNELS['trigger_voice']:
+            await self.create_temp_channel(member)
+
+    async def check_and_delete_channel(self, channel: discord.VoiceChannel):
+        """Проверяет конкретный канал и удаляет его, если он пуст."""
+        try:
+            # Получаем актуальное состояние из кэша
+            cached_channel = self.bot.get_channel(channel.id) or channel
+            
+            if len(cached_channel.members) == 0:
+                self.temp_channels.discard(channel.id)
+                await cached_channel.delete(reason="Временный голосовой канал пуст.")
+        except discord.NotFound:
+            self.temp_channels.discard(channel.id)
+        except discord.Forbidden:
+            print(f"❌ Нет прав для удаления канала {channel.name}")
+        except Exception as e:
+            print(f"❌ Ошибка при удалении канала {channel.name}: {e}")
+
+    async def create_temp_channel(self, member: discord.Member):
+        # Защита от спама: если канал для юзера уже создается — выходим
+        if member.id in self._creating_users:
             return
-        channel = await safe_fetch_channel(bot, after.channel.id)
-        if channel is None:
-            print(f"⚠️ Канал {after.channel.id} не найден")
-            return
-        if not member.guild.me.guild_permissions.move_members:
-            print("⚠️ Нет прав на перемещение участников")
-            return
-        if not isinstance(channel, discord.VoiceChannel):
-            return
-        # 1. Пользователь ЗАШЁЛ в голосовой канал-триггер
-        if after.channel and after.channel.id == TRIGGER_CHANNEL_ID:
-            category = await safe_fetch_channel(self.bot, TEMP_CATEGORY_ID)
-            if not category:
-                print(f"Категория с ID {TEMP_CATEGORY_ID} не найдена!")
-                return
-            new_channel = await member.guild.create_voice_channel(
-                name=f"╠ {member.display_name}'s 𝙘𝙝𝙖𝙣𝙣𝙚𝙡",
-                category=category,
-                reason=f"Создание временного канала для {member}")
+
+        async with self._creation_lock:
+            self._creating_users.add(member.id)
             try:
-                await new_channel.set_permissions(member, connect=True, manage_channels=True, move_members=True)
-                await new_channel.set_permissions(member.guild.default_role, connect=True, send_messages=True, attach_files=False)
+                # Получаем категорию из кэша (без лишних HTTP запросов)
+                category = self.bot.get_channel(BotConfig.CATEGORIES['temp_voices'])
+                if not category:
+                    category = await safe_fetch_channel(self.bot, BotConfig.CATEGORIES['temp_voices'])
+                
+                if not category:
+                    print(f"❌ Категория временных каналов не найдена!")
+                    return
+
+                # Проверяем, не находится ли пользователь уже в созданной комнатe
+                for channel in category.voice_channels:
+                    if channel.id == BotConfig.CHANNELS['trigger_voice']:
+                        continue
+                    if member in channel.members and self.is_temp_channel(channel):
+                        return
+
+                # Формируем права СРАЗУ при создании (1 запрос вместо 4)
+                overwrites = {
+                    member.guild.default_role: discord.PermissionOverwrite(
+                        connect=True,
+                        send_messages=True,
+                        attach_files=False
+                    ),
+                    member: discord.PermissionOverwrite(
+                        connect=True,
+                        manage_channels=True,
+                        move_members=True
+                    )
+                }
+
+                # Добавляем ограничения для Muted роли, если она существует
+                if self.muted_role_id:
+                    muted_role = member.guild.get_role(self.muted_role_id)
+                    if muted_role:
+                        overwrites[muted_role] = discord.PermissionOverwrite(
+                            connect=False,
+                            speak=False,
+                            stream=False
+                        )
+
+                # Создание канала
+                new_channel = await member.guild.create_voice_channel(
+                    name=f"╠ {member.display_name}'s 𝙘𝙝𝙖𝙣𝙣𝙚𝙡",
+                    category=category,
+                    overwrites=overwrites,
+                    reason=f"Автоматическое создание временного канала для {member}"
+                )
+                
+                self.temp_channels.add(new_channel.id)
+
+                # Перемещаем пользователя в созданный канал
+                await member.move_to(new_channel)
+
             except discord.Forbidden:
-                print(f"❌ Нет прав для перемещения {member.name}")
+                print(f"❌ Недостаточно прав для создания/перемещения у {member.name}")
             except discord.HTTPException as e:
-                if e.code == 10003: 
-                    print(f"⚠️ Канал не найден: {e}")
-                elif e.status == 429:
-                    print(f"⏳ Слишком много запросов (rate limit): {e}")
-                else:
-                    print(f"❌ HTTP ошибка: {e}")
+                print(f"⚠️ Ошибка Discord API при создании канала: {e}")
             except Exception as e:
-                print(f"❌ Ошибка в on_voice_state_update: {e}")
-            await member.move_to(new_channel)
-        # 2. Проверяем ВСЕ временные каналы на пустоту (включая те, откуда пользователь вышел)
-        await self.check_empty_temp_channels(member.guild)
-    
-    async def check_empty_temp_channels(self, guild):
-        category = await safe_fetch_channel(self.bot, TEMP_CATEGORY_ID)
+                print(f"❌ Ошибка в create_temp_channel: {e}")
+            finally:
+                self._creating_users.remove(member.id)
+
+    async def check_empty_temp_channels(self, guild: discord.Guild):
+        """Запускается как сервис/таск для фоновой очистки брошенных каналов."""
+        category = self.bot.get_channel(BotConfig.CATEGORIES['temp_voices'])
         if not category:
             return
+
         for channel in category.voice_channels:
-            if channel.id == TRIGGER_CHANNEL_ID:
+            if channel.id == BotConfig.CHANNELS['trigger_voice']:
                 continue
-            if len(channel.members) == 0:
+            if len(channel.members) == 0 and self.is_temp_channel(channel):
+                await self.check_and_delete_channel(channel)
+
+class VoiceSpamDetector(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # Хранилище логов голосовой активности: {user_id: [datetime, datetime, ...]}
+        self.voice_tracker = {}
+        
+        # НАСТРОЙКИ ФИЛЬТРА
+        self.max_actions = 5         # Максимальное количество переподключений/смен каналов
+        self.time_window = 5         # Временной промежуток (в секундах)
+        self.punishment_mute = 15    # Время таймаута за нарушение (в минутах)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        # Игнорируем ботов и администраторов
+        if member.bot or member.guild_permissions.administrator:
+            return
+
+        # Проверяем, изменился ли голосовой канал (вход, выход, перемещение)
+        # Игнорируем системные события типа mute/unmute/deafen
+        if before.channel == after.channel:
+            return
+
+        now = datetime.now(timezone.utc)
+        user_id = member.id
+
+        # Инициализируем список для пользователя, если его нет в трекере
+        if user_id not in self.voice_tracker:
+            self.voice_tracker[user_id] = []
+
+        # Очищаем историю переподключений от записей старше временного окна
+        cutoff = now - timedelta(seconds=self.time_window)
+        self.voice_tracker[user_id] = [t for t in self.voice_tracker[user_id] if t > cutoff]
+
+        # Регистрируем текущее действие
+        self.voice_tracker[user_id].append(now)
+
+        # Проверяем превышение лимита (наказываем ровно на указанном значении)
+        if len(self.voice_tracker[user_id]) >= self.max_actions:
+            # Сбрасываем счетчик, чтобы избежать множественных наказаний за один спам-круг
+            self.voice_tracker[user_id] = []
+
+            # Переменная для отправки сообщения (пытаемся писать в тот канал, откуда шел спам, либо в общий)
+            target_channel = after.channel or before.channel
+
+            # 1. Принудительно отключаем пользователя от любого голосового канала
+            if member.voice:
                 try:
-                    await channel.delete(reason="Канал пуст, удаляю.")
-                except discord.NotFound:
-                    pass
+                    await member.move_to(None, reason="Принудительное отключение за спам голосовыми каналами")
                 except discord.Forbidden:
-                    print(f"Нет прав для удаления {channel.name}")
+                    print(f"⚠️ Не удалось отключить {member.name} из голосового канала (нет прав).")
+
+            # 2. Выдаем таймаут нарушителю
+            try:
+                duration = timedelta(minutes=self.punishment_mute)
+                await member.timeout(duration, reason=f"Голосовой спам (более {self.max_actions} подключений за {self.time_window} сек.)")
+                
+                # Отправляем предупреждение в текстовый чат, связанный с голосовым каналом (или текстовый лог)
+                if target_channel:
+                    await safe_send(
+                        target_channel, 
+                        f"<:forbiddenemoji:1515780232404144279> {member.mention} оᴛᴨᴩᴀʙᴧᴇн ʙ ᴛᴀйʍᴀуᴛ нᴀ {self.punishment_mute} ʍинуᴛ зᴀ ᴄᴨᴀʍ ᴦоᴧоᴄоʙыʍи ᴋᴀнᴀᴧᴀʍи!",
+                        delete_after=10)
+            except discord.Forbidden:
+                print(f"❌ Недостаточно прав для выдачи таймаута пользователю {member.name}.")
+            except Exception as e:
+                print(f"❌ Ошибка при попытке выдать таймаут за голосовой спам: {e}")
+
+            # 3. Отправляем красивый лог на ваш технический сервер
+            log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('tech_logs'))
+            if log_channel:
+                guild = member.guild
+                embed_log = discord.Embed(
+                    title="<:warningemoji:1515756604178305054> ᴦоᴧоᴄоʙой ᴄᴨᴀʍ ᴨᴩᴇᴄᴇчᴇн",
+                    description=f"ᴨоᴧьзоʙᴀᴛᴇᴧь {member.mention} уᴄᴛᴩоиᴧ ɸᴧуд ᴨодᴋᴧючᴇнияʍи ʙ ᴦоᴧоᴄоʙых ᴋᴀнᴀᴧᴀх.",
+                    color=discord.Color.brand_red(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                embed_log.add_field(name="<:smileemoji:1526114626557706252> Нарушитель", value=f"{member.mention}", inline=True)
+                embed_log.add_field(name="<:verifiedemoji:1525207492928213204> Действие", value=f"Кикнут из голосового канала,\nвыдан таймаут на {self.punishment_mute} мин.", inline=True)
+                embed_log.add_field(name="<:successemoji:1515691944460685372> иᴄᴛочниᴋ", value=f"Сервер: **{guild.name}**", inline=False)
+                
+                if guild.icon:
+                    embed_log.set_footer(text=guild.name, icon_url=guild.icon.url)
+                    
+                await safe_send(log_channel, embed=embed_log)
+
+class ThreadModeration(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # Настройка: через сколько часов неактивности архивировать ветку
+        self.archive_threshold_hours = 6
+        
+        # Запуск фоновой задачи
+        self.auto_archive_threads.start()
+
+    def cog_unload(self):
+        self.auto_archive_threads.cancel()
+
+    @tasks.loop(minutes=30)  # Проверка запускается каждые 30 минут
+    async def auto_archive_threads(self):
+        """Фоновый цикл для поиска и архивации неактивных веток на серверах."""
+        await self.bot.wait_until_ready()
+        
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=self.archive_threshold_hours)
+        
+        # Проходим по всем серверам, где установлен бот
+        for guild in self.bot.guilds:
+            # Получаем все активные (не архивированные) ветки на сервере
+            for thread in guild.threads:
+                # Пропускаем приватные ветки, если бот не имеет к ним доступа
+                if thread.archived:
+                    continue
+                
+                try:
+                    # Пытаемся получить время последнего сообщения в ветке
+                    last_message_time = None
+                    
+                    if thread.last_message_id:
+                        # Получаем последнее сообщение из кэша или истории
+                        try:
+                            last_msg = await thread.fetch_message(thread.last_message_id)
+                            last_message_time = last_msg.created_at
+                        except discord.NotFound:
+                            # Если сообщение удалено, используем время создания самой ветки
+                            last_message_time = thread.created_at
+                    else:
+                        # Если сообщений вообще не было, ориентируемся на время создания
+                        last_message_time = thread.created_at
+
+                    # Если время последнего действия старше установленного порога
+                    if last_message_time and last_message_time < cutoff:
+                        # Отправляем предупреждающее сообщение перед архивацией
+                        await safe_send(thread,
+                            f"<:sweepemoji:1526652778469003294> ʙᴇᴛᴋᴀ ᴀʙᴛоʍᴀᴛичᴇᴄᴋи ᴀᴩхиʙиᴩоʙᴀнᴀ из-зᴀ нᴇᴀᴋᴛиʙноᴄᴛи ʙ ᴛᴇчᴇниᴇ {self.archive_threshold_hours} ч.\n"
+                            f"ᴧюбой учᴀᴄᴛниᴋ ʍожᴇᴛ оᴛᴨᴩᴀʙиᴛь ноʙоᴇ ᴄообщᴇниᴇ, чᴛобы оᴛᴋᴩыᴛь ᴇё ᴄноʙᴀ.")
+                        
+                        # Удаляем ветку
+                        await thread.delete(reason="Авто-удаление по причине неактивности")
+                        print(f"📦 Ветка '{thread.name}' (ID: {thread.id}) на сервере {guild.name} успешно архивирована.")
+                        
+                except discord.Forbidden:
+                    # Ошибка, если у бота нет прав на управление ветками в этом канале
+                    print(f"⚠️ Нет прав для архивации ветки '{thread.name}' на сервере {guild.name}.")
                 except Exception as e:
-                    print(f"Ошибка при удалении {channel.name}: {e}")
+                    print(f"❌ Ошибка при обработке ветки {thread.id}: {e}")
 
-class WarningView(discord.ui.View):
-    def __init__(self, user_id: int):
-        super().__init__(timeout=10)
-        self.user_id = user_id
+    @auto_archive_threads.before_loop
+    async def before_auto_archive(self):
+        await self.bot.wait_until_ready()
 
-    @discord.ui.button(label="ᴨочᴇʍу ʍоё ᴄообщᴇниᴇ удᴀᴧᴇно?", style=discord.ButtonStyle.gray)
-    async def button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Это уведомление предназначено не для вас.", ephemeral=True)
-        else:
-            await safe_send(interaction, "<:grantedemoji:1520173483299049623> Такого формата ссылки запрещены!", ephemeral=True)
-
-# class ConfirmAction(discord.ui.View):
-#     def __init__(self, user_id, action, target):
-#         super().__init__(timeout=30)
-#         self.user_id = user_id
-#         self.action = action
-#         self.target = target
-#         self.value = None
-
-#     @discord.ui.button(label="✅ Подтвердить", style=discord.ButtonStyle.danger)
-#     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-#         if interaction.user.id != self.user_id:
-#             await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Это не ваше действие!", ephemeral=True)
-#             return
-#         self.value = True
-#         self.stop()
-#     @discord.ui.button(label="❌ Отмена", style=discord.ButtonStyle.secondary)
-#     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-#         if interaction.user.id != self.user_id:
-#             await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Это не ваше действие!", ephemeral=True)
-#             return
-#         self.value = False
-#         self.stop()
-
-# class ModPanel(discord.ui.View):
-#     def __init__(self, moderator, target):
-#         super().__init__(timeout=60)
-#         self.moderator = moderator
-#         self.target = target
-    
-#     @discord.ui.button(label="Варн", style=discord.ButtonStyle.primary, emoji="⚠️")
-#     async def warn_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-#         if interaction.user != self.moderator:
-#             await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Эта панель не для вас!", ephemeral=True)
-#             return
-#         await interaction.response.send_modal(WarnModal(self.target))
-#     @discord.ui.button(label="Мут", style=discord.ButtonStyle.primary, emoji="🔇")
-#     async def mute_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-#         if interaction.user != self.moderator:
-#             await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Эта панель не для вас!", ephemeral=True)
-#             return
-#         await interaction.response.send_modal(MuteModal(self.target))
-#     @discord.ui.button(label="Кик", style=discord.ButtonStyle.danger, emoji="👢")
-#     async def kick_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-#         if interaction.user != self.moderator:
-#             await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Эта панель не для вас!", ephemeral=True)
-#             return
-#         view = ConfirmAction(interaction.user.id, "kick", self.target)
-#         await safe_send(interaction, f"<:warningemoji:1515756604178305054> Вы уверены, что хотите кикнуть {self.target.mention}?", view=view, ephemeral=True)
-#         await view.wait()
-#         if view.value:
-#             try:
-#                 await self.target.kick(reason=f"Кикнут {self.moderator.name}")
-#                 await safe_edit(interaction, content=f"<:grantedemoji:1520173483299049623> {self.target.mention} был кикнут!", view=None)
-#             except:
-#                 await safe_edit(interaction, content="<:forbbiden2emoji:1517479332866429008> Не удалось кикнуть пользователя!", view=None)
-#         else:
-#             await safe_edit(interaction, content="<:grantedemoji:1520173483299049623> Действие отменено", view=None)
-    
-#     @discord.ui.button(label="Бан", style=discord.ButtonStyle.danger, emoji="🔨")
-#     async def ban_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-#         if interaction.user != self.moderator:
-#             await interaction.response.send_message("<:forbbiden2emoji:1517479332866429008> Эта панель не для вас!", ephemeral=True)
-#             return
+class ReactionAntiSpam(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # Хранилище логов реакций: {user_id: [datetime, datetime, ...]}
+        self.reaction_tracker = {}
         
-#         view = ConfirmAction(interaction.user.id, "ban", self.target)
-#         await interaction.response.send_message(f"⚠️ Вы уверены, что хотите забанить {self.target.mention}?", view=view, ephemeral=True)
+        # НАСТРОЙКИ ФИЛЬТРА
+        self.max_reactions = 5     # Максимальное количество реакций
+        self.time_window = 5       # За какой промежуток времени (в секундах)
+        self.punishment_mute = 20    # Время таймаута за нарушение (в минутах)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        # Игнорируем действия самого бота
+        if payload.user_id == self.bot.user.id:
+            return
+
+        # Получаем объект сервера (guild)
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+
+        # Игнорируем администраторов
+        member = payload.member or guild.get_member(payload.user_id)
+        if not member or member.bot or member.guild_permissions.administrator:
+            return
+
+        now = datetime.now(timezone.utc)
+        user_id = payload.user_id
+
+        # Инициализируем список для пользователя, если его нет
+        if user_id not in self.reaction_tracker:
+            self.reaction_tracker[user_id] = []
+
+        # Очищаем историю реакций пользователя от записей старше нашего временного окна
+        cutoff = now - timedelta(seconds=self.time_window)
+        self.reaction_tracker[user_id] = [t for t in self.reaction_tracker[user_id] if t > cutoff]
+
+        # Добавляем текущую реакцию в историю
+        self.reaction_tracker[user_id].append(now)
+
+        # Проверяем превышение лимита
+        if len(self.reaction_tracker[user_id]) >= self.max_reactions:
+            # Сбрасываем счетчик, чтобы не спамить наказаниями
+            self.reaction_tracker[user_id] = []
+
+            channel = self.bot.get_channel(payload.channel_id) or await self.bot.fetch_channel(payload.channel_id)
+
+            # Выдача наказания (Timeout)
+            try:
+                duration = timedelta(minutes=self.punishment_mute)
+                await member.timeout(duration, reason=f"Спам реакциями (более {self.max_reactions} за {self.time_window} сек.)")
+                
+                # Отправка предупреждения в чат (через safe_send)
+                if channel:
+                    await safe_send(
+                        channel, 
+                        f"<:forbiddenemoji:1515780232404144279> {member.mention} оᴛᴨᴩᴀʙᴧᴇн ʙ ᴛᴀйʍᴀуᴛ нᴀ {self.punishment_mute} ʍинуᴛ зᴀ ᴄᴨᴀʍ ᴩᴇᴀᴋцияʍи!",
+                        delete_after=10)
+            except discord.Forbidden:
+                print(f"❌ Нет прав для выдачи таймаута пользователю {member.name} (ID: {member.id})")
+            except Exception as e:
+                print(f"❌ Ошибка при попытке выдать таймаут за спам реакциями: {e}")
+
+            # Попытка удалить ВСЕ реакции нарушителя с этого сообщения
+            if channel:
+                try:
+                    message = await channel.fetch_message(payload.message_id)
+                    # Проходимся по всем реакциям на сообщении и удаляем те, которые оставил нарушитель
+                    for reaction in message.reactions:
+                        try:
+                            # Проверяем, реагировал ли этот пользователь данным эмодзи
+                            async for user in reaction.users():
+                                if user.id == member.id:
+                                    await message.remove_reaction(reaction.emoji, member)
+                                    break # Переходим к следующему эмодзи на этом сообщении
+                        except Exception as e_single:
+                            print(f"⚠️ Не удалось удалить конкретную реакцию {reaction.emoji}: {e_single}")
+                except Exception as e:
+                    print(f"⚠️ Не удалось получить сообщение для зачистки всех реакций: {e}")
+
+            # Логирование нарушения
+            log_channel = await safe_fetch_channel(self.bot, BotConfig.CHANNELS.get('warning_logs'))
+            if log_channel:
+                embed_log = discord.Embed(
+                    title="<:warningemoji:1515756604178305054> ᴄᴨᴀʍ ᴩᴇᴀᴋцияʍи нᴇйᴛᴩᴀᴧизоʙᴀн",
+                    description=f"ᴨоᴧьзоʙᴀᴛᴇᴧь {member.mention} ᴨᴩᴇʙыᴄиᴧ ᴧиʍиᴛ уᴄᴛᴀноʙᴋи ᴩᴇᴀᴋций.",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                embed_log.add_field(name="<:smileemoji:1526114626557706252> учᴀᴄᴛниᴋ", value=f"{member.mention}", inline=True)
+                embed_log.add_field(name="<:binemoji:1525176536607752202> нᴀᴋᴀзᴀниᴇ", value=f"Таймаут на {self.punishment_mute} мин.", inline=True)
+                
+                if guild.icon:
+                    embed_log.set_footer(text=guild.name, icon_url=guild.icon.url)
+                    
+                await safe_send(log_channel, embed=embed_log)
+
+class ServerStatsCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.cooldown_until = None
+        # Запускаем фоновую задачу обновления статистики
+        self.update_counters_loop.start()
+
+    def cog_unload(self):
+        # Обязательно останавливаем задачу при выгрузке кога
+        self.update_counters_loop.cancel()
+
+    # Фоновая задача, работающая каждые 10 минут
+    # Discord строго лимитирует переименование каналов (макс. 2 раза в 10 минут),
+    # поэтому интервал в 10 минут является идеальным и безопасным стандартом.
+    @tasks.loop(minutes=10)
+    async def update_counters_loop(self):
+        await self.bot.wait_until_ready()
+
+        now = datetime.now(timezone.utc)
+
+        if self.cooldown_until and now < self.cooldown_until:
+            remaining = (self.cooldown_until - now).total_seconds()
+            print(f"⏳ [Статистика] Обновление пропущено. Кулдаун лимитов Discord активен ещё {remaining:.1f} сек.")
+            return
+
+        # 2. Задержка перед первой проверкой при запуске бота
+        if self.update_counters_loop.current_loop == 0:
+            print("⏳ [Статистика] Ожидаем 15 секунд перед первой проверкой счетчиков при старте...")
+            await asyncio.sleep(15)
         
-#         await view.wait()
-#         if view.value:
-#             try:
-#                 await self.target.ban(reason=f"Забанен {self.moderator.name}")
-#                 await interaction.edit_original_response(content=f"<:grantedemoji:1520173483299049623> {self.target.mention} был забанен!", view=None)
-#             except:
-#                 await interaction.edit_original_response(content="<:forbbiden2emoji:1517479332866429008> Не удалось забанить пользователя!", view=None)
-#         else:
-#             await interaction.edit_original_response(content="<:grantedemoji:1520173483299049623> Действие отменено", view=None)
+        # Получаем ID сервера и каналов из конфигурации BotConfig
+        guild_id = getattr(BotConfig, 'GUILD_ID', None)
+        if not guild_id:
+            return
 
-# class WarnModal(discord.ui.Modal):
-#     def __init__(self, target):
-#         super().__init__(title="Выдача варна")
-#         self.target = target
-    
-#         reason = discord.ui.TextInput(
-#             label="Причина варна",
-#             placeholder="Укажите причину...",
-#             required=True,
-#             max_length=500
-#         )
-#         self.add_item(self.reason)
-    
-#     async def on_submit(self, interaction: discord.Interaction):
-#         await interaction.response.send_message(f"⚠️ Варн выдан {self.target.mention} по причине: {self.reason.value}", ephemeral=False)
-#         # Здесь можно добавить логирование варнов в БД
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            return
 
-# class MuteModal(discord.ui.Modal, title="Выдача мута"):
-#     def __init__(self, target):
-#         super().__init__()
-#         self.target = target
-    
-#         duration = discord.ui.TextInput(
-#             label="Длительность (в минутах)",
-#             placeholder="10, 30, 60...",
-#             required=True
-#         )
+        # Получаем настроенные ID голосовых каналов для счётчиков
+        stats_config = BotConfig.STATS
+        if not stats_config:
+            return
+
+        # Подсчитываем количество участников
+        total_members = guild.member_count
+        bots_count = sum(1 for member in guild.members if member.bot)
+        humans_count = total_members - bots_count
+
+        # Словарь соответствия типов счётчиков и их названий
+        # Вы можете использовать любые эмодзи и шрифты
+        counters_data = {
+            'total': (stats_config.get('total_id'), f"╔ⲡⲟⲗьⳅⲟⲃⲁⲧⲉⲗⲉύ — {total_members}"),
+            'humans': (stats_config.get('humans_id'), f"╠ⲩɥⲁⲥⲧⲏυⲕⲟⲃ — {humans_count}"),
+            'bots': (stats_config.get('bots_id'), f"╚ⳝⲟⲧⲟⲃ — {bots_count}")
+        }
+
+        for key, (channel_id, new_name) in counters_data.items():
+            if not channel_id:
+                continue
+
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.VoiceChannel):
+                # Проверяем, изменилось ли значение, чтобы не слать лишние запросы в API
+                if channel.name != new_name:
+                    try:
+                        await channel.edit(name=new_name, reason="Автоматическое обновление счётчиков сервера")
+                        print(f"📊 [Статистика] Счётчик {key} успешно обновлен на: '{new_name}'")
+                        # Небольшая пауза между запросами для безопасности
+                        await asyncio.sleep(2)
+                    except discord.Forbidden:
+                        print(f"⚠️ Ошибка счетчиков: У бота нет прав на редактирование канала {channel_id}")
+                    except discord.HTTPException as e:
+                        if e.status == 429:
+                            # Красиво обрабатываем лимит запросов, не забивая консоль ошибками
+                            print(f"⏰ [Rate Limit] Дискорд временно ограничил изменение канала {channel_id}. Обновим позже.")
+                        else:
+                            print(f"⚠️ Ошибка обновления счетчика {channel_id}: {e}")
+
+    # =========================================================================
+    # АДМИНИСТРАТИВНАЯ СЛЭШ-КОМАНДА ДЛЯ НАСТРОЙКИ СЧЁТЧИКОВ
+    # =========================================================================
+
+    @app_commands.command(name="счетчики_обновить", description="Принудительно обновить динамические счётчики сервера прямо сейчас")
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(administrator=True)
+    async def force_update_stats(self, interaction: discord.Interaction):
+        """Ручной запуск обновления счётчиков (доступно только Администраторам)."""
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        stats_config = BotConfig.STATS
         
-#         reason = discord.ui.TextInput(
-#             label="Причина мута",
-#             placeholder="Укажите причину...",
-#             required=True,
-#             max_length=500
-#         )
+        if not stats_config:
+            await interaction.followup.send(
+                content="❌ Счётчики не настроены в BotConfig.CHANNELS['stats']!",
+                ephemeral=True
+            )
+            return
 
-#         self.add_item(self.duration)
-#         self.add_item(self.reason)
-    
-#     async def on_submit(self, interaction: discord.Interaction):
-#         try:
-#             minutes = int(self.duration.value)
-#             duration_seconds = minutes * 60
-            
-#             # Создаем роль Muted если её нет
-#             mute_role = interaction.guild.get_role(MUTED_ROLE)
-#             if not mute_role:
-#                 mute_role = await interaction.guild.create_role(name="Muted")
-#                 for channel in interaction.guild.channels:
-#                     await channel.set_permissions(mute_role, send_messages=False, add_reactions=False)
-            
-#             await self.target.add_roles(mute_role, reason=f"Мут на {minutes} мин. Причина: {self.reason.value}")
-#             await interaction.response.send_message(f"🔇 {self.target.mention} получил мут на {minutes} минут. Причина: {self.reason.value}")
-            
-#             # Авто-снятие мута
-#             await asyncio.sleep(duration_seconds)
-#             await self.target.remove_roles(mute_role)
-            
-#         except ValueError:
-#             await interaction.response.send_message("<:forbbiden2emoji:1517479332866429008> Неправильный формат времени! Используйте число (минуты)", ephemeral=True)
+        total_members = guild.member_count
+        bots_count = sum(1 for m in guild.members if m.bot)
+        humans_count = total_members - bots_count
+
+        counters_data = {
+            'total': (stats_config.get('total_id'), f"╔ⲡⲟⲗьⳅⲟⲃⲁⲧⲉⲗⲉύ — {total_members}"),
+            'humans': (stats_config.get('humans_id'), f"╠ⲩɥⲁⲥⲧⲏυⲕⲟⲃ — {humans_count}"),
+            'bots': (stats_config.get('bots_id'), f"╚ⳝⲟⲧⲟⲃ — {bots_count}")
+        }
+
+        updated_count = 0
+        for key, (channel_id, new_name) in counters_data.items():
+            if not channel_id:
+                continue
+
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.VoiceChannel):
+                try:
+                    await channel.edit(name=new_name, reason=f"Ручное обновление. Инициатор: {interaction.user}")
+                    updated_count += 1
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"❌ Не удалось обновить канал {channel_id}: {e}")
+
+        await interaction.followup.send(
+            content=f"✅ Успешно обновлено счётчиков: **{updated_count}** из 3.\n"
+                    f"*Обратите внимание: Discord позволяет обновлять названия каналов не чаще 2 раз в 10 минут!*",
+            ephemeral=True
+        )
+
+# 1. Создаем класс View с кнопкой для разблокировки
+class UnlockView(discord.ui.View):
+    def __init__(self, duration: int, support_role_ids: list):
+        super().__init__(timeout=duration * 60) # Кнопка активна ровно то время, пока идет блокировка
+        self.support_role_ids = support_role_ids
+
+    @discord.ui.button(label="Открыть чат", style=discord.ButtonStyle.success, emoji="🔓", custom_id="unlock_channel_btn")
+    async def unlock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        channel = interaction.channel
+        user = interaction.user
+
+        # Проверка прав у нажавшего кнопку
+        # 1. Проверяем, является ли пользователь администратором
+        is_admin = user.guild_permissions.administrator
+        
+        # 2. Проверяем наличие права управления каналами
+        has_manage_channels = user.guild_permissions.manage_channels
+        
+        # 3. Проверяем, есть ли у пользователя хотя бы одна роль из Support_roles
+        has_support_role = any(role.id in self.support_role_ids for role in user.roles)
+
+        # Объединяем все условия в итоговую проверку
+        has_perm = is_admin or has_manage_channels or has_support_role
+
+        if not has_perm:
+            await safe_send(
+                interaction, 
+                "<:forbbiden2emoji:1517479332866429008> У вас нет прав для управления блокировкой этого канала!", 
+                ephemeral=True)
+            return
+
+        # Разблокируем @everyone
+        everyone_role = guild.default_role
+        everyone_overwrites = channel.overwrites_for(everyone_role)
+        everyone_overwrites.send_messages = None
+        await channel.set_permissions(everyone_role, overwrite=everyone_overwrites, reason=f"Разблокировка кнопкой модератором {user}")
+
+        # Сбрасываем изменения для ролей поддержки
+        for role_id in self.support_role_ids:
+            role = guild.get_role(role_id)
+            if role:
+                role_ow = channel.overwrites_for(role)
+                role_ow.send_messages = None
+                if role_ow.is_empty():
+                    await channel.set_permissions(role, overwrite=None)
+                else:
+                    await channel.set_permissions(role, overwrite=role_ow)
+
+        # Отключаем кнопку, чтобы ее нельзя было нажать повторно
+        self.stop()
+        for child in self.children:
+            child.disabled = True
+
+        # Отправляем сообщение о разблокировке
+        unlock_embed = discord.Embed(
+            title="<:verifiedemoji:1525207492928213204> ᴋᴀнᴀᴧ ᴩᴀзбᴧоᴋиᴩоʙᴀн",
+            description=f"Модератор {user.mention} оᴛᴋᴩыᴧ чᴀᴛ. ʙы ᴄноʙᴀ ʍожᴇᴛᴇ оᴛᴨᴩᴀʙᴧяᴛь ᴄообщᴇния!",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        if guild.icon:
+            unlock_embed.set_footer(text='𝐅𝐈𝐆𝐇𝐓 𝐂𝐋𝐔𝐁', icon_url=guild.icon.url)
+        
+        # Обновляем оригинальное сообщение (отключаем кнопку) и отправляем новый эмбед в чат
+        await interaction.response.edit_message(view=self)
+        await safe_send(interaction, embed=unlock_embed)
+
+class VerificationView(discord.ui.View):
+    def __init__(self, role_id: int):
+        super().__init__(timeout=None)
+        self.role_id = role_id
+
+        # Динамически добавляем кнопку с выданной ролью
+        button = discord.ui.Button(
+            label="Пройти верификацию",
+            style=discord.ButtonStyle.success,
+            emoji="<:grantedemoji:1520173483299049623>",
+            custom_id=f"verify_btn_{role_id}"
+        )
+        button.callback = self.verify_callback
+        self.add_item(button)
+
+    async def verify_callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            await safe_send(interaction, "Ошибка: Роль верификации не найдена на сервере.", ephemeral=True)
+            return
+
+        if role in interaction.user.roles:
+            await safe_send(interaction, "Вы уже прошли верификацию!", ephemeral=True)
+            return
+
+        try:
+            await interaction.user.add_roles(role, reason="Верификация через кнопку")
+            await safe_send(interaction, "<:grantedemoji:1520173483299049623> Вы успешно получили доступ к серверу!", ephemeral=True)
+        except discord.Forbidden:
+            await safe_send(interaction, "У бота недостаточно прав для выдачи этой роли.", ephemeral=True)
 
 # ========== ДЕКОРАТОР ==========
 
-def guild_only():
+def moderation_only(allowed_roles: list = None):
     async def predicate(interaction: discord.Interaction):
-        if not interaction.guild:
-            await safe_send(interaction, "<:deniedemoji:1519737463126360294> Только на сервере!", ephemeral=True)
+        if not interaction.guild or interaction.guild.id != BotConfig.GUILD_ID:
+            return False
+        if interaction.user.guild_permissions.administrator:
+            return True
+        if allowed_roles is None:
+            all_support_roles = (
+                BotConfig.SUPPORT_ROLES.get('first_order', []) +
+                BotConfig.SUPPORT_ROLES.get('second_order', []) +
+                BotConfig.SUPPORT_ROLES.get('third_order', []))
+            roles_to_check = all_support_roles
+        else:
+            roles_to_check = allowed_roles
+        user_roles = [role.id for role in interaction.user.roles]
+        
+        if not any(role_id in roles_to_check for role_id in user_roles):
             return False
         return True
     return app_commands.check(predicate)
 
-# ========== БЕЗОПАСНАЯ ОТПРАВКА СООБЩЕНИЙ ==========
+# ========== МОДЕРАЦИОННЫЕ КОМАНДЫ (КЛАСС) ==========
 
-async def safe_delete(message, delay=0, max_retries=3):
-    if delay > 0:
-        await asyncio.sleep(delay)
-    
-    for attempt in range(max_retries):
-        try:
-            await message.delete()
-            return True
-        except HTTPException as e:
-            if e.status == 429:  # Rate limit
-                retry_after = float(e.response.headers.get('Retry-After', 1))
-                await asyncio.sleep(retry_after)
-                continue
-            elif e.status == 403:  # Forbidden - нет прав
-                return False
-            elif e.status == 404:  # Not Found - уже удалено
-                return True
-            else:
-                return False
-        except (Forbidden, NotFound):
-            return False
-        except:
-            return False
-    return False
+class ModerationCommands(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.last_purge_date = None
+        # Запускаем фоновую задачу для автоматической очистки логов раз в 2 дня
 
-async def safe_reply(message, content=None, max_retries=3, **kwargs):
-    if content is None and not kwargs.get('embed') and not kwargs.get('file'):
-        return None
-    
-    for attempt in range(max_retries):
-        try:
-            return await message.reply(content, **kwargs)
-        except HTTPException as e:
-            if e.status == 429:  # Rate limit
-                retry_after = float(e.response.headers.get('Retry-After', 1))
-                await asyncio.sleep(retry_after)
-                continue
-            else:
-                return None
-        except:
-            return None
-    return None
+    async def cog_load(self):
+        self.bot.loop.create_task(self._auto_purge_logs_task())
 
-async def safe_send(destination, content=None, max_retries=3, **kwargs):
-    if content is None and not kwargs.get('embed') and not kwargs.get('file'):
-        return None
-    
-    # Определяем объект для отправки
-    send_target = None
-    
-    # Проверяем, является ли destination Interaction
-    if isinstance(destination, Interaction):
-        # Для Interaction используем response или followup
-        if not destination.response.is_done():
-            # Если ответ еще не отправлен
-            for attempt in range(max_retries):
-                try:
-                    if kwargs.get('ephemeral'):
-                        await destination.response.send_message(content, **kwargs)
-                    else:
-                        await destination.response.send_message(content, **kwargs)
-                    return True
-                except HTTPException as e:
-                    if e.status == 429:
-                        retry_after = float(e.response.headers.get('Retry-After', 1))
-                        await asyncio.sleep(retry_after)
-                        continue
-                    else:
-                        return None
-                except:
-                    return None
-        else:
-            # Если ответ уже отправлен, используем followup
-            for attempt in range(max_retries):
-                try:
-                    if kwargs.get('ephemeral', False):
-                        return await destination.followup.send(content, **kwargs)
-                    else:
-                        return await destination.followup.send(content, **kwargs)
-                except HTTPException as e:
-                    if e.status == 429:
-                        retry_after = float(e.response.headers.get('Retry-After', 1))
-                        await asyncio.sleep(retry_after)
-                        continue
-                    else:
-                        return None
-                except:
-                    return None
-        return None
-    
-    # Для остальных объектов
-    if hasattr(destination, 'send'):
-        send_target = destination
-    elif hasattr(destination, 'channel') and hasattr(destination.channel, 'send'):
-        # Для контекста команд
-        send_target = destination.channel
-    elif hasattr(destination, 'message') and hasattr(destination.message, 'channel'):
-        # Для некоторых объектов
-        send_target = destination.message.channel
-    else:
-        return None
-    
-    for attempt in range(max_retries):
-        try:
-            return await send_target.send(content, **kwargs)
-        except HTTPException as e:
-            if e.status == 429:  # Rate limit
-                retry_after = float(e.response.headers.get('Retry-After', 1))
-                await asyncio.sleep(retry_after)
-                continue
-            else:
-                return None
-        except:
-            return None
-    return None
+    async def _auto_purge_logs_task(self):
+        # 1. Ждём, пока бот полностью подключится к Discord API
+        await self.bot.wait_until_ready()
+        
+        # 2. Дополнительная задержка в 5 секунд, чтобы кэш каналов успел полностью сформироваться
+        # Это гарантирует, что функция safe_fetch_channel мгновенно возьмет каналы из локального кэша
+        await asyncio.sleep(5)
+        
+        while not self.bot.is_closed():
+            try:
+                now = datetime.now(timezone.utc)
+                
+                # Если очистка ещё ни разу не проводилась или с момента последней прошло более 2 дней
+                if self.last_purge_date is None or (now - self.last_purge_date).days >= 2:
+                    
+                    # Собираем ID каналов логов, которые подлежат периодической очистке
+                    target_channels_keys = ['warning_logs', 'mod_logs_commands', 'mod_logs', 'tech_logs']
+                    
+                    for key in target_channels_keys:
+                        channel_id = BotConfig.CHANNELS.get(key)
+                        if not channel_id:
+                            continue
+                            
+                        channel = await safe_fetch_channel(self.bot, channel_id)
+                        if isinstance(channel, discord.TextChannel):
+                            try:
+                                # Удаляем сообщения в канале логов (пропускаем закреплённые сообщения)
+                                deleted = await channel.purge(limit=2000, check=lambda m: not m.pinned)
+                                deleted_count = len(deleted)
+                                
+                                # Отправляем информационное сообщение об успешной очистке
+                                if deleted_count > 0:
+                                    info_embed = discord.Embed(
+                                        title="<:sweepemoji:1526652778469003294> ᴨᴧᴀноʙᴀя очиᴄᴛᴋᴀ ᴧоᴦоʙ",
+                                        description=(
+                                            f"ᴋᴀнᴀᴧ быᴧ ᴀʙᴛоʍᴀᴛичᴇᴄᴋи очищᴇн оᴛ уᴄᴛᴀᴩᴇʙɯих зᴀᴨиᴄᴇй.\n"
+                                            f"удᴀᴧᴇно ᴄообщᴇний: **{deleted_count}**.\n"
+                                            f"ᴄᴧᴇдующᴀя ᴨᴧᴀноʙᴀя очиᴄᴛᴋᴀ: через **2 дня**."
+                                        ),
+                                        color=discord.Color.blue(),
+                                        timestamp=now
+                                    )
+                                    info_embed.set_image(url='https://i.pinimg.com/originals/6f/41/1a/6f411aecccd141513e25d6be01e9f59d.gif?nii=t')
+                                    info_embed.set_footer(text="(ᴄᴀо) ᴄиᴄᴛᴇʍᴀ ᴀʙᴛоʍᴀᴛичᴇᴄᴋой оᴨᴛиʍизᴀции")
+                                    await channel.send(embed=info_embed, delete_after=60) # удалится само через минуту
+                                    
+                                print(f"🧹 [Авто-очистка] Успешно очищен канал {channel.name} ({key}). Удалено сообщений: {deleted_count}")
+                            except Exception as channel_err:
+                                print(f"⚠️ Не удалось очистить канал логов {channel_id}: {channel_err}")
+                                
+                    # Обновляем метку времени последней очистки логов
+                    self.last_purge_date = now
+                    
+            except Exception as task_err:
+                print(f"❌ Ошибка в задаче автоматической очистки логов: {task_err}")
+                
+            # Проверяем условия раз в 1 час, чтобы не грузить процессор
+            await asyncio.sleep(3600)
 
-async def safe_dm_send(user_or_id, content=None, embed=None, view=None, max_retries=3):
-    # Получаем пользователя, если передан ID
-    if isinstance(user_or_id, int):
-        user = await safe_fetch_user(bot, user_or_id)
-        if not user:
-            print(f"❌ Пользователь {user_or_id} не найден!")
-            return False
-    else:
-        user = user_or_id
-    
-    # Проверяем, что пользователь существует
-    if not user:
-        print("❌ Пользователь не указан!")
-        return False
-    
-    # Отправляем с повторными попытками
-    for attempt in range(max_retries):
+    @app_commands.command(name='удалить_сообщения', description='Очистить чат.')
+    @app_commands.guild_only()
+    @moderation_only(BotConfig.SUPPORT_ROLES['third_order'])
+    async def clear_messages(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1, 100]):
+        # Откладываем ответ, так как очистка может занять больше 3 секунд
+        await interaction.response.defer(ephemeral=True)
+
+        user = interaction.user
+        user_mention = user.mention
+        user_avatar = user.display_avatar.url if user.display_avatar else None
+        guild = interaction.guild
+
         try:
-            await user.send(content=content, embed=embed, view=view)
-            return True
-            
+            # Выполняем очистку канала
+            deleted = await interaction.channel.purge(limit=amount)
+            deleted_count = len(deleted)
+
+            # Отправляем подтверждение модератору
+            await interaction.followup.send(
+                content=f"<:successemoji:1515691944460685372> Успешно удалено {deleted_count} сообщений.",
+                ephemeral=True
+            )
+
+            # Логирование в модераторский канал
+            log_channel_id = BotConfig.CHANNELS.get('mod_logs_commands')
+            if log_channel_id:
+                log_channel = await safe_fetch_channel(self.bot, log_channel_id)
+                if log_channel:
+                    embed = discord.Embed(
+                        title="<:clearemoji:1515691240476377218> /удалить_сообщения",
+                        description=f"`ʍодᴇᴩᴀᴛоᴩ`: {user_mention} <:forbiddenemoji:1515780232404144279>\n"
+                                    f"`удᴀᴧиᴧ ᴄообщᴇний`: {deleted_count} <:successemoji:1515691944460685372>\n"
+                                    f"`ᴋᴀнᴀᴧ`: {interaction.channel.mention} <:clearemoji:1515691240476377218>",
+                        color=discord.Color.darker_grey(),
+                        timestamp=datetime.now()
+                    )
+                    if user_avatar:
+                        embed.set_thumbnail(url=user_avatar)
+                    if guild and guild.icon:
+                        embed.set_footer(text='𝐅𝐈𝐆𝐇𝐓 𝐂𝐋𝐔𝐁', icon_url=guild.icon.url)
+
+                    await safe_send(log_channel, embed=embed)
+
         except discord.Forbidden:
-            print(f"❌ Нет доступа к ЛС {user.name} (закрытые DM или бот заблокирован)")
-            return False
-            
+            await interaction.followup.send(
+                content="<:forbiddenemoji:1515780232404144279> У бота нет прав на управление сообщениями в этом канале!",
+                ephemeral=True
+            )
         except discord.HTTPException as e:
-            if e.status == 429:  # Rate Limit
-                retry_after = float(e.response.headers.get('Retry-After', 1))
-                wait_time = retry_after * (attempt + 1)
-                print(f"⏳ Rate limit, ждем {wait_time} сек...")
-                await asyncio.sleep(wait_time)
-                continue
-            else:
-                print(f"❌ HTTP ошибка: {e.status}")
-                return False
-                
-
-async def safe_edit(interaction_or_message, content=None, max_retries=3, **kwargs):
-    if content is None and not kwargs.get('embed') and not kwargs.get('view'):
-        return None
-    if isinstance(interaction_or_message, Interaction):
-        interaction = interaction_or_message
-        
-        for attempt in range(max_retries):
-            try:
-                # Проверяем, был ли уже ответ
-                if interaction.response.is_done():
-                    # Если ответ уже отправлен - используем edit_original_response
-                    await interaction.edit_original_response(content=content, **kwargs)
-                else:
-                    # Если ответа еще не было - отправляем новый
-                    await interaction.response.send_message(content=content, **kwargs)
-                return True
-                
-            except HTTPException as e:
-                if e.status == 429:  # Rate Limit
-                    retry_after = float(e.response.headers.get('Retry-After', 1))
-                    await asyncio.sleep(retry_after * (attempt + 1))
-                    continue
-                else:
-                    print(f"HTTP ошибка при редактировании Interaction: {e.status}")
-                    return False
-                    
-            except Forbidden:
-                print("Нет прав для редактирования Interaction")
-                return False
-                
-            except NotFound:
-                print("Interaction или сообщение не найдены")
-                return False
-                
-            except Exception as e:
-                print(f"Ошибка при редактировании Interaction: {e}")
-                return False
-        
-        print(f"Не удалось отредактировать Interaction после {max_retries} попыток")
-        return False
-    
-    # ====== РЕДАКТИРОВАНИЕ MESSAGE ======
-    elif isinstance(interaction_or_message, Message):
-        message = interaction_or_message
-        
-        for attempt in range(max_retries):
-            try:
-                return await message.edit(content=content, **kwargs)
-                
-            except HTTPException as e:
-                if e.status == 429:  # Rate Limit
-                    retry_after = float(e.response.headers.get('Retry-After', 1))
-                    await asyncio.sleep(retry_after * (attempt + 1))
-                    continue
-                else:
-                    print(f"HTTP ошибка при редактировании Message: {e.status}")
-                    return None
-                    
-            except Forbidden:
-                print("Нет прав для редактирования Message")
-                return None
-                
-            except NotFound:
-                print("Message не найдено")
-                return None
-                
-            except Exception as e:
-                print(f"Ошибка при редактировании Message: {e}")
-                return None
-        
-        print(f"Не удалось отредактировать Message после {max_retries} попыток")
-        return None
-    
-    else:
-        print("Ошибка: передан не Interaction и не Message")
-        return None
-
-
-async def safe_fetch_channel(bot, channel_id, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            return await bot.fetch_channel(channel_id)
-        except HTTPException as e:
-            if e.status == 429:  # Rate Limit
-                retry_after = float(e.response.headers.get('Retry-After', 1))
-                await asyncio.sleep(retry_after * (attempt + 1))  # Экспоненциальная задержка
-                continue
-            else:
-                print(f"HTTP ошибка при получении канала {channel_id}: {e}")
-                return None
-                
-        except Forbidden:
-            print(f"Нет доступа к каналу {channel_id}")
-            return None
-            
-        except NotFound:
-            print(f"Канал {channel_id} не найден")
-            return None
-            
+            await interaction.followup.send(
+                content=f"<:forbiddenemoji:1515780232404144279> Ошибка Discord API: {e}",
+                ephemeral=True
+            )
         except Exception as e:
-            print(f"Неизвестная ошибка при получении канала {channel_id}: {e}")
-            return None
-    
-    print(f"Не удалось получить канал {channel_id} после {max_retries} попыток")
-    return None
+            await interaction.followup.send(
+                content=f"<:forbiddenemoji:1515780232404144279> Произошла ошибка при удалении: {e}",
+                ephemeral=True
+            )
 
+    @app_commands.command(name="lock", description="Заблокировать канал на время")
+    @app_commands.guild_only()
+    @moderation_only(BotConfig.SUPPORT_ROLES['second_order'] + BotConfig.SUPPORT_ROLES['third_order'])
+    @app_commands.describe(duration="Длительность блокировки в минутах (по умолчанию 60)")
+    async def lock_command(self, interaction: discord.Interaction, duration: app_commands.Range[int, 10, 1440]):
+        guild = interaction.guild
+        channel = interaction.channel
+        user = interaction.user
 
-async def safe_fetch_user(bot, user_id, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            return await bot.fetch_user(user_id)
-        except HTTPException as e:
-            if e.status == 429:
-                retry_after = float(e.response.headers.get('Retry-After', 1))
-                await asyncio.sleep(retry_after)
-                continue
-            else:
-                return None
-        except:
-            return None
-    return None
-
-# === ГЕНЕРАЦИЯ КАРТИНКИ (Pillow) ===
-async def generate_level_card(username: str, avatar_url: str, level: int, current_xp: int, next_level_xp: int, role_name: str) -> io.BytesIO:
-    width, height = 600, 200
-    card = Image.new("RGBA", (width, height), (24, 25, 28, 255))
-    draw = ImageDraw.Draw(card)
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(avatar_url) as response:
-            if response.status == 200:
-                avatar_bytes = await response.read()
-                avatar_img = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-            else:
-                avatar_img = Image.new("RGBA", (120, 120), (100, 100, 100, 255))
-
-    avatar_img = avatar_img.resize((120, 120))
-    mask = Image.new("L", (120, 120), 0)
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.ellipse((0, 0, 120, 120), fill=255)
-    avatar_rounded = ImageOps.fit(avatar_img, (120, 120), centering=(0.5, 0.5))
-    avatar_rounded.putalpha(mask)
-    
-    card.paste(avatar_rounded, (40, 40), avatar_rounded)
-    
-    try:
-        font_name = ImageFont.truetype(FONT_PATH, 28)
-        font_info = ImageFont.truetype(FONT_PATH, 22)
-        font_sub = ImageFont.truetype(FONT_PATH, 16)
-    except IOError:
-        font_name = font_info = font_sub = ImageFont.load_default()
-
-    draw.text((190, 35), username, font=font_name, fill=(255, 255, 255, 255))
-    draw.text((190, 75), f"Уровень: {level}", font=font_info, fill=(114, 137, 218, 255))
-    draw.text((190, 110), f"Роль по лвлу: {role_name}", font=font_sub, fill=(185, 187, 190, 255))
-    
-    xp_text = f"{current_xp} / {next_level_xp} XP"
-    draw.text((560, 125), xp_text, font=font_sub, fill=(185, 187, 190, 255), anchor="ra")
-
-    bar_x, bar_y = 190, 150
-    bar_width, bar_height = 370, 16
-    
-    draw.rounded_rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], radius=8, fill=(47, 49, 54, 255))
-    
-    xp_percentage = min(current_xp / next_level_xp, 1.0)
-    if xp_percentage > 0:
-        current_bar_width = int(bar_width * xp_percentage)
-        draw.rounded_rectangle([bar_x, bar_y, bar_x + current_bar_width, bar_y + bar_height], radius=8, fill=(114, 137, 218, 255))
-
-    image_binary = io.BytesIO()
-    card.save(image_binary, "PNG")
-    image_binary.seek(0)
-    return image_binary
-
-def warn_text(num):
-    return {1: "ⲡⲉⲣⲃыⲙ", 2: "ⲃⲧⲟⲣыⲙ", 3: "ⲧⲣⲉⲧьⲉⲙ"}.get(num, "очᴇᴩᴇдныʍ")
-
-async def warn_user(interaction: discord.Interaction, member: discord.Member = None, reason: str ="Не указана"):
-    global warns
-    if not member:
-        await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Укажите пользователя!", ephemeral=True)
-        return
-    roles = {
-        'category': member.guild.get_role(WARNINGS_CATEGORY_ROLE),
-        1: member.guild.get_role(FIRST_WARN_ROLE),
-        2: member.guild.get_role(SECOND_WARN_ROLE),
-        3: member.guild.get_role(THIRD_WARN_ROLE)
-    }
-    for key, role in roles.items():
-        if not role:
-            await safe_send(interaction, f"<:forbiddenemoji:1515780232404144279> Роль {key} не найдена!", ephemeral=True)
+        # 1. Проверка типов: команда работает только в обычных текстовых каналах
+        if not isinstance(channel, discord.TextChannel):
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Эту команду можно использовать только в текстовых каналах!", ephemeral=True)
             return
 
-    user_id = member.id
-    user_data = await manager.get_user_ruler(user_id)
-    if not user_data:
-        await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Пользователь не найден в базе данных!", ephemeral=True)
-        return
-    current_warns = user_data.get("warnings", 0)
-    next_warn = current_warns + 1
-    if next_warn <= 3:
-        # Убираем старую роль
-        if current_warns > 0 and roles.get(current_warns):
-            try:
-                await member.remove_roles(roles[current_warns])
-            except discord.NotFound:
-                pass
-            except Exception as e:
-                print(f"Ошибка снятия роли: {e}")
-        # Добавляем новую роль
-        try:
-            await member.add_roles(roles[next_warn], reason=f"Предупреждение #{next_warn}. Причина: {reason}")
-        except discord.NotFound:
-            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Роль не найдена!", ephemeral=True)
-            return
-        except Exception as e:
-            await safe_send(interaction, f"<:forbiddenemoji:1515780232404144279> Ошибка: {e}", ephemeral=True)
-            return
-        
-        await safe_send(
-            interaction,
-            f"<:warnemoji:1515687856549658774> {member.mention} нᴀᴋᴀзᴀн **{warn_text(next_warn)}** ᴨᴩᴇдуᴨᴩᴇждᴇниᴇʍ! ᴨᴩичинᴀ: {reason}",
-            ephemeral=False)
-        
-        # ✅ Бан при 3 предупреждениях
-        if next_warn == 3:
-            try:
-                await member.ban(reason=f"3 предупреждения. {reason} (Модератор: {interaction.user})", delete_message_days=1)
-                await safe_send(
-                    interaction,
-                    f"<:neutralizeemoji:1515694760990347325> {member.mention} **быᴧ нᴇйᴛᴩᴀᴧизоʙᴀн** зᴀ ᴨᴧохоᴇ ᴨоʙᴇдᴇниᴇ...")
-            except discord.Forbidden:
-                await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Нет прав для бана пользователя!", ephemeral=True)
-            except Exception as e:
-                await safe_send(interaction, f"<:forbiddenemoji:1515780232404144279> Ошибка при бане: {e}", ephemeral=True)
-    
-    # ✅ Добавляем категорию предупреждений
-    if not any(role.id == WARNINGS_CATEGORY_ROLE for role in member.roles):
-        try:
-            await member.add_roles(roles['category'])
-        except Exception as e:
-            print(f"Ошибка добавления категории: {e}")
-    
-    # ✅ Обновляем данные в базе данных
-    try:
-        await manager.update_user_ruler(user_id, next_warn, user_data.get('reputation', 0), user_data.get('last_time_reputation', 0.0))
-    except Exception as e:
-        print(f"Ошибка обновления данных: {e}")
-    return next_warn
+        # 2. Список ролей модерации/поддержки из конфига или локальной переменной
+        support_role_ids = BotConfig.SUPPORT_ROLES.get("first_order", []) + BotConfig.SUPPORT_ROLES.get("second_order", []) + BotConfig.SUPPORT_ROLES.get("third_order", [])
 
-async def ban_user_by_id(interaction: discord.Interaction, user: discord.User, reason: str):
-    await interaction.response.defer()
-    user_mention = user.mention
-    user_avatar = user.display_avatar.url if user.display_avatar else None
-    
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
-    
-    try:
-        await interaction.guild.ban(user, reason=f"{reason} (Модератор: {interaction.user})", delete_message_days=1)
-        await safe_send(interaction, f"<:banemoji:1515689296118677534> {user_mention} **был уᴄᴛᴩᴀнён** <:neutralizeemoji:1515694760990347325>. ᴨᴩичинᴀ: {reason}", ephemeral=False)
-        if log_channel:
-            try:
-                embed = discord.Embed(
-                    title="<:banemoji:1515689296118677534> /нейтрализовать",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>\n"
-                                f"`ᴨᴩичинᴀ`: {reason} <:clearemoji:1515691240476377218>\n"
-                                f"`стаᴛуᴄ`: Пользователь не был на сервере",
-                    color=discord.Color.brand_red(),
-                    timestamp=interaction.created_at
+        # Проверка прав вызова: наличие права manage_channels ИЛИ хотя бы одной роли поддержки
+        has_perm = user.guild_permissions.manage_channels or any(r.id in support_role_ids for r in user.roles)
+        if not has_perm:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> У вас нет прав для блокировки этого канала!", ephemeral=True)
+            return
+
+        # 3. Проверка прав самого бота
+        bot_member = guild.me or await guild.fetch_member(self.bot.user.id)
+        if not channel.permissions_for(bot_member).manage_channels:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> У бота нет права `Управление каналами` (Manage Channels) в этом канале!", ephemeral=True)
+            return
+
+        # 4. Проверка корректности времени (от 1 минуты до 24 часов)
+        if duration < 1 or duration > 1440:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Укажите время от 1 до 1440 минут (24 часа)!", ephemeral=True)
+            return
+
+        everyone_role = guild.default_role
+        everyone_overwrites = channel.overwrites_for(everyone_role)
+
+        # 5. Проверка: не заблокирован ли уже канал
+        if everyone_overwrites.send_messages is False:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> Этот канал уже заблокирован!", ephemeral=True)
+            return
+
+        # Откладываем ответ, так как обновление прав нескольких ролей может занять время
+        await interaction.response.defer()
+
+        # --- ПРИМЕНЕНИЕ ОГРАНИЧЕНИЙ ---
+
+        # А) Блокируем доступ для @everyone
+        everyone_overwrites.send_messages = False
+        await channel.set_permissions(
+            everyone_role, 
+            overwrite=everyone_overwrites, 
+            reason=f"Блокировка канала (Модератор: {user})")
+
+        # Б) Явно разрешаем писать ролям поддержки (Support_Roles)
+        unlocked_support_roles = []
+        for role_id in support_role_ids:
+            role = guild.get_role(role_id)
+            if role:
+                role_overwrites = channel.overwrites_for(role)
+                role_overwrites.send_messages = True
+                await channel.set_permissions(
+                    role, 
+                    overwrite=role_overwrites, 
+                    reason="Разрешение доступа модераторам во время блокировки"
                 )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-                
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав для бана этого пользователя!",
-            ephemeral=True)
-    except discord.HTTPException as e:
-        if e.status == 429:
-            await safe_send(
-                interaction,
-                "⏳ Слишком много запросов. Подождите немного.",
-                ephemeral=True)
-        else:
-            await safe_send(
-                interaction,
-                f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
-                ephemeral=True)
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка при бане: {e}",
-            ephemeral=True)
+                unlocked_support_roles.append(role.mention)
 
-async def send_dm_welcome(member: discord.Member):
-    try:
-        dm_embed = discord.Embed(
-        title=f"Добро пожаловать в {member.guild.name}!",
-        description="Спасибо, что присоединились к нашему сообществу!\n\n"
-                    "📖 Ознакомьтесь с правилами в канале #rules \n"
-                    "🎉 Представьтесь в канале #chat \n"
-                    "❓ Если есть вопросы, пишите в #вопросы",
-        color=discord.Color.darker_grey()
+        # --- ОТПРАВКА ОБЪЯВЛЕНИЯ ---
+        
+        unlock_time = int(discord.utils.utcnow().timestamp()) + (duration * 60)
+        support_info = ", ".join(unlocked_support_roles) if unlocked_support_roles else "Администрация"
+
+        embed = discord.Embed(
+            title="<:owneremoji:1517494149119611063> ᴋᴀнᴀᴧ ʙᴩᴇʍᴇнно оᴦᴩᴀничᴇн",
+            description=(
+                f"ᴋᴀнᴀᴧ зᴀᴋᴩыᴛ нᴀ **{duration} ʍинуᴛ** дᴧя ᴩᴀзбоᴩᴀ ᴄиᴛуᴀций и уᴩᴇᴦуᴧиᴩоʙᴀния ᴋонɸᴧиᴋᴛоʙ. <:verifiedemoji:1525207492928213204>\n\n"
+                f"<:successemoji:1515691944460685372> **ᴨиᴄᴀᴛь ʍоᴦуᴛ:** {support_info}\n"
+                f"<:forbiddenemoji:1515780232404144279> **ᴩᴀзбᴧоᴋиᴩоʙᴋᴀ:** <t:{unlock_time}:R> (<t:{unlock_time}:f>)\n\n"
+                f"ᴨожᴀᴧуйᴄᴛᴀ, ᴄобᴧюдᴀйᴛᴇ ᴨоᴩядоᴋ и ожидᴀйᴛᴇ ᴩᴇɯᴇния ʍодᴇᴩᴀᴛоᴩоʙ."
+            ),
+            color=discord.Color.brand_red(),
+            timestamp=discord.utils.utcnow()
         )
-        dm_embed.set_image(url='https://aniyuki.com/wp-content/uploads/2022/08/aniyuki-hello-19.gif')
-        await safe_dm_send(member, embed=dm_embed)
-    except discord.Forbidden:
-        print(f"Не могу отправить DM пользователю {member.name} (закрытые ЛС)")
-    except discord.HTTPException as e:
-        print(f"Ошибка при отправке DM: {e}")
-    except Exception as e:
-        print(f"Неизвестная ошибка: {e}")
+        embed.set_footer(text=f"Заблокировал: {user.display_name}", icon_url=user.display_avatar.url)
 
-# ========== КОМАНДЫ НАСТРОЙКИ ==========
+        view = UnlockView(duration=duration, support_role_ids=BotConfig.SUPPORT_ROLES['second_order']+BotConfig.SUPPORT_ROLES['third_order'])
+        await safe_send(interaction, embed=embed, view=view)
 
-@bot.tree.command(name='sync', description='Синхронизировать команды.')
-@app_commands.guild_only()
-@app_commands.default_permissions(administrator=True)
-async def sync(interaction: discord.Interaction):
-    if interaction.user.id != DEVELOPER_ID:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У тебя нет прав для этой команды.", ephemeral=True)
-        return
-    bot.tree.clear_commands(guild=None)
-    await bot.tree.sync(guild=None)
-    await safe_send(interaction, "<:grantedemoji:1520173483299049623> Команды синхронизированы для текущего сервера.", ephemeral=False)
+        # --- ТАЙМЕР АВТО-РАЗБЛОКИРОВКИ ---
 
-# ========== КОМАНДЫ МОДЕРАЦИИ ==========
+        async def auto_unlock():
+            await asyncio.sleep(duration * 60)
 
-@bot.tree.command(name="create_ticket", description="Создать панель тикета.")
-@app_commands.guild_only()
-@app_commands.default_permissions(administrator=True)
-async def create_ticket(interaction: discord.Interaction):
-    await interaction.response.send_modal(AdminSetupModal(channel=interaction.channel))
+            # Проверяем, заблокирован ли еще канал
+            current_everyone = channel.overwrites_for(everyone_role)
+            if current_everyone.send_messages is False:
+                # Возвращаем дефолтные права для @everyone
+                current_everyone.send_messages = None
+                await channel.set_permissions(everyone_role, overwrite=current_everyone, reason="Автоматическая разблокировка по таймеру")
 
-@bot.tree.command(name='удалить_сообщения', description='Очистить чат.')
-@app_commands.guild_only()
-@app_commands.default_permissions(administrator=True)
-async def clear_messages(interaction: discord.Interaction, amount: int = None):
-    if amount is None:
-        amount = 10
-    elif amount > 100:
-        amount = 100
-    elif amount < 0:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Количество должно быть больше 0!", ephemeral=True)
-        return
-    safe_user = await safe_fetch_user(interaction.client, interaction.user.id)
-    if safe_user:
-        user_mention = safe_user.mention
-        user_avatar = safe_user.display_avatar.url if safe_user.display_avatar else None
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
-    await safe_send(interaction, f"<:clearemoji:1515691240476377218> удᴀᴧᴇниᴇ {amount} ᴄообщᴇний...", ephemeral=True)
-    try:
-        deleted = await interaction.channel.purge(limit=amount)
-        await safe_edit(interaction, content=f"<:successemoji:1515691944460685372> удᴀᴧᴇно {len(deleted)} ᴄообщᴇний")
-        if log_channel:
-            try:
-                embed = discord.Embed(
-                    title="<:clearemoji:1515691240476377218> /удалить_сообщения",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {user_mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`удᴀᴧиᴧ ᴄообщᴇний`: {amount} <:successemoji:1515691944460685372>\n"
-                                f"`ᴋᴀнᴀᴧ`: {interaction.channel.mention} <:clearemoji:1515691240476377218>",
-                    color=discord.Color.darker_grey(),
-                    timestamp=interaction.created_at
+                # Сбрасываем персональные оверрайды для ролей поддержки, если они менялись
+                for role_id in support_role_ids:
+                    role = guild.get_role(role_id)
+                    if role:
+                        role_ow = channel.overwrites_for(role)
+                        role_ow.send_messages = None
+                        # Если у оверрайда больше нет настроек, сбрасываем его полностью
+                        if role_ow.is_empty():
+                            await channel.set_permissions(role, overwrite=None, reason="Сброс прав после блокировки")
+                        else:
+                            await channel.set_permissions(role, overwrite=role_ow, reason="Сброс прав после блокировки")
+
+                # Делаем кнопку неактивной, если время вышло
+                for child in view.children:
+                    child.disabled = True
+
+                unlock_embed = discord.Embed(
+                    title="<:verifiedemoji:1525207492928213204> ᴋᴀнᴀᴧ ᴩᴀзбᴧоᴋиᴩоʙᴀн",
+                    description="ʙᴩᴇʍя бᴧоᴋиᴩоʙᴋи иᴄᴛᴇᴋᴧо. доᴄᴛуᴨ ᴋ чᴀᴛу ʙоᴄᴄᴛᴀноʙᴧᴇн. ᴨожᴀᴧуйᴄᴛᴀ, ᴄобᴧюдᴀйᴛᴇ ᴨᴩᴀʙиᴧᴀ!",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
                 )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-    except discord.Forbidden:
-        await safe_edit(
-            interaction,
-            content="<:forbbiden2emoji:1517479332866429008> Нет прав на удаление сообщений!")
-    except discord.HTTPException as e:
-        await safe_edit(
-            interaction,
-            content=f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}")
-    except Exception as e:
-        await safe_edit(
-            interaction,
-            content=f"<:forbbiden2emoji:1517479332866429008> Ошибка при удалении: {e}")
-
-@bot.tree.command(name='выгнать', description='Выгнать пользователя.')
-@app_commands.guild_only()
-@app_commands.default_permissions(kick_members=True)
-async def kick_member(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
-    """Кикает участника"""
-    if not interaction.user.guild_permissions.kick_members:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на кик!", ephemeral=True)
-        return
-    if member == interaction.user:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя кикнуть самого себя!", ephemeral=True)
-        return
-    if member.guild_permissions.administrator:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя кикнуть администратора!", ephemeral=True)
-        return
-    if member.bot:
-        await safe_send(interaction, "🤖 Нельзя модерировать бота!", ephemeral=True)
-        return
-    # ✅ Проверяем, что пользователь на сервере
-    if not interaction.guild.get_member(member.id):
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Пользователь не на сервере!", ephemeral=True)
-        return
-    await interaction.response.defer()
-    safe_user = await safe_fetch_user(interaction.client, member.id)
-    if safe_user:
-        user_mention = safe_user.mention
-        user_avatar = safe_user.display_avatar.url if safe_user.display_avatar else None
-    # ✅ Получаем канал логов
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
-    try:
-        await member.kick(reason=f"{reason} (Модератор: {interaction.user})")
-        
-        # ✅ Отправляем сообщение
-        await safe_send(interaction, f"<:kickemoji:1515693208783425617> {user_mention} **ʙᴩᴇʍᴇнно оᴛᴄᴛᴩᴀнён**. ᴨᴩичинᴀ: {reason}", ephemeral=False)
-        # ✅ Отправляем лог
-        if log_channel:
-            try:
-                embed = discord.Embed(
-                    title="<:kickemoji:1515693208783425617> /выгнать",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>\n"
-                                f"`ᴨᴩичинᴀ`: {reason} <:clearemoji:1515691240476377218>",
-                    color=discord.Color.brand_red(),
-                    timestamp=interaction.created_at
-                )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав для кика этого пользователя!",
-            ephemeral=True)
-    except discord.HTTPException as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
-            ephemeral=True)
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка при кике: {e}",
-            ephemeral=True)
-
-@bot.tree.command(name='нейтрализовать', description='Забанить пользователя.')
-@app_commands.guild_only()
-@app_commands.default_permissions(ban_members=True)
-async def ban_member(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
-    if not interaction.user.guild_permissions.ban_members:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на бан!", ephemeral=True)
-        return
-    if member == interaction.user:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя забанить самого себя!", ephemeral=True)
-        return
-    if member.guild_permissions.administrator:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя забанить администратора!", ephemeral=True)
-        return
-    if member.bot:
-        await safe_send(interaction, "🤖 Нельзя модерировать бота!", ephemeral=True)
-        return
-    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя забанить пользователя с ролью выше или равной вашей!", ephemeral=True)
-        return
-
-    await interaction.response.defer()
-    
-    # Получаем данные пользователя для красивого отображения
-    safe_user = await safe_fetch_user(interaction.client, member.id)
-    if safe_user:
-        user_mention = safe_user.mention
-        user_avatar = safe_user.display_avatar.url if safe_user.display_avatar else None
-    else:
-        user_mention = member.mention
-        user_avatar = member.display_avatar.url if member.display_avatar else None
-
-    # ✅ Получаем канал логов
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
-    
-    try:
-        # ✅ БАНИМ через объект Member (у него есть метод ban)
-        await member.ban(reason=f"{reason} (Модератор: {interaction.user})", delete_message_days=1)
-        
-        # ✅ Отправляем сообщение
-        await safe_send(interaction, f"<:banemoji:1515689296118677534> {user_mention} **был уᴄᴛᴩᴀнён** <:neutralizeemoji:1515694760990347325>. ᴨᴩичинᴀ: {reason}", ephemeral=False)
-        
-        # ✅ Логирование
-        if log_channel:
-            try:
-                embed = discord.Embed(
-                    title="<:banemoji:1515689296118677534> /нейтрализовать",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>\n"
-                                f"`ᴨᴩичинᴀ`: {reason} <:clearemoji:1515691240476377218>",
-                    color=discord.Color.brand_red(),
-                    timestamp=interaction.created_at
-                )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-                
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав для бана этого пользователя!",
-            ephemeral=True)
-    except discord.HTTPException as e:
-        if e.status == 429:
-            await safe_send(
-                interaction,
-                "⏳ Слишком много запросов. Подождите немного.",
-                ephemeral=True)
-        else:
-            await safe_send(
-                interaction,
-                f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
-                ephemeral=True)
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка при бане: {e}",
-            ephemeral=True)
-
-@bot.tree.command(name='аппелировать', description='Разбанить пользователя.')
-@app_commands.guild_only()
-@app_commands.default_permissions(ban_members=True)
-async def unban_member(interaction: discord.Interaction, name_or_id: str):
-    if not interaction.user.guild_permissions.ban_members:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на разбан!", ephemeral=True)
-        return
-    # ✅ Получаем канал логов
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
-    # ✅ Получаем список забаненных
-    try:
-        banned_users = [entry async for entry in interaction.guild.bans()]
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав на просмотр банов!",
-            ephemeral=True)
-        return
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка получения бан-листа: {e}",
-            ephemeral=True)
-        return
-    if not banned_users:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Бан-лист пуст!",
-            ephemeral=True)
-        return
-    await interaction.response.defer()
-    # ✅ Ищем пользователя
-    user = None
-    # Поиск по ID
-    if name_or_id.isdigit():
-        user_id = int(name_or_id)
-        for entry in banned_users:
-            if entry.user.id == user_id:
-                user = entry.user
-                break
-    else:
-        # Поиск по имени (без учета регистра)
-        name_lower = name_or_id.lower()
-        for entry in banned_users:
-            if name_lower in entry.user.name.lower():
-                user = entry.user
-                break
-    
-    # ✅ Если не нашли - пробуем по display_name
-    if not user:
-        name_lower = name_or_id.lower()
-        for entry in banned_users:
-            if entry.user.display_name and name_lower in entry.user.display_name.lower():
-                user = entry.user
-                break
-    if not user:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Пользователь **{name_or_id}** не найден в бан-листе!",
-            ephemeral=True)
-        return
-    # ✅ Получаем безопасные данные пользователя
-    safe_user = await safe_fetch_user(interaction.client, user.id)
-    # ✅ Сохраняем данные ДО разбана
-    if safe_user:
-        user_mention = safe_user.mention
-        user_id = safe_user.id
-        user_avatar = safe_user.display_avatar.url if safe_user.display_avatar else None
-    else:
-        # Если safe_fetch_user не сработал - используем данные из бан-листа
-        user_mention = f"<@{user.id}>"
-        user_id = user.id
-        user_avatar = None
-    # ✅ Разбаниваем
-    try:
-        await interaction.guild.unban(user)
-        # ✅ Отправляем сообщение
-        await safe_send(interaction, f"<:unbanemoji:1515696568156557433> ᴨоᴧьзоʙᴀᴛᴇᴧь {user_mention} **нᴇ ʙиноʙᴇн**!", ephemeral=False)
-        # ✅ Отправляем лог
-        if log_channel:
-            try:
-                embed = discord.Embed(
-                    title="<:unbanemoji:1515696568156557433> /аппелировать",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>\n"
-                                f"`ᴀйди`: {user_id} <:peopleemoji:1517486620939649044>",
-                    color=discord.Color.brand_green(),
-                    timestamp=interaction.created_at
-                )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-        
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав для разбана!",
-            ephemeral=True)
-    except discord.HTTPException as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
-            ephemeral=True)
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка при разбане: {e}",
-            ephemeral=True)
-
-@bot.tree.command(name='арестовать', description='Ограничить пользователю право общаться.')
-@app_commands.guild_only()
-@app_commands.default_permissions(moderate_members=True)
-async def mute_member(interaction: discord.Interaction, member: discord.Member, minutes: int = None, reason: str = "Не указана"):
-    if not interaction.user.guild_permissions.moderate_members:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на мут!", ephemeral=True)
-        return
-    if member == interaction.user:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя замутить самого себя!", ephemeral=True)
-        return
-    if member.bot:
-        await safe_send(interaction, "🤖 Нельзя модерировать бота!", ephemeral=True)
-        return
-    if member.guild_permissions.administrator:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя замутить администратора!", ephemeral=True)
-        return
-    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя замутить пользователя с ролью выше вашей!", ephemeral=True)
-        return
-    await interaction.response.defer()
-    # ✅ Проверка времени
-    if minutes is None:
-        minutes = 60
-    elif minutes > 1440:
-        minutes = 1440
-    elif minutes < 1:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Время должно быть больше 0 минут!", ephemeral=True)
-        return
-    end_time = datetime.now() + timedelta(minutes=minutes)
-    end_timestamp = int(end_time.timestamp())
-    # ✅ Получаем роль
-    mute_role = interaction.guild.get_role(MUTED_ROLE)
-    if not mute_role:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Роль MUTED_ROLE не найдена!", ephemeral=True)
-        return
-    # ✅ Получаем канал логов
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
-    
-    # ✅ Получаем безопасные данные пользователя
-    user = await safe_fetch_user(interaction.client, member.id)
-    user_mention = user.mention if user else member.mention
-    user_avatar = user.display_avatar.url if user.display_avatar else None
-    try:
-        # ✅ Выдаем мут
-        await member.add_roles(mute_role, reason=f"Мут на {minutes} минут. Причина: {reason}")
-        # ✅ Отправляем сообщение
-        await safe_send(interaction, f"<:muteemoji:1515688038867538000> {user_mention} **ᴀᴩᴇᴄᴛоʙᴀн**. оᴄʙобождᴇниᴇ ʙ <t:{end_timestamp}:T>. ᴨᴩичинᴀ: {reason}", ephemeral=False)
-        if log_channel:
-            try:
-                embed = discord.Embed(
-                    title="<:muteemoji:1515688038867538000> /арестовать",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>\n"
-                                f"`оᴄʙобождᴇниᴇ`: <t:{end_timestamp}:T> <:unmuteemoji:1515698075367112857>\n"
-                                f"`ᴨᴩичинᴀ`: {reason} <:clearemoji:1515691240476377218>",
-                    color=discord.Color.brand_red(),
-                    timestamp=interaction.created_at
-                )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-        
-        # ✅ Авто-снятие мута
-        await asyncio.sleep(minutes * 60)
-        
-        # ✅ Проверяем, что пользователь все еще на сервере
-        try:
-            # Обновляем объект member
-            fresh_member = interaction.guild.get_member(member.id)
-            if fresh_member and mute_role in fresh_member.roles:
-                await fresh_member.remove_roles(mute_role)
-                # ✅ Отправляем сообщение о размуте
+                if guild.icon:
+                    unlock_embed.set_footer(text='𝐅𝐈𝐆𝐇𝐓 𝐂𝐋𝐔𝐁', icon_url=guild.icon.url)
                 try:
-                    await safe_send(interaction,
-                        f"<:unmuteemoji:1515698075367112857> {user_mention} **зᴀᴋончиᴧ** ᴛюᴩᴇʍный **ᴄᴩоᴋ** ᴀʙᴛоʍᴀᴛичᴇᴄᴋи!",
-                        ephemeral=False)
+                    await channel.send(embed=unlock_embed)
                 except Exception as e:
-                    print(f"Ошибка при отправке сообщения о размуте: {e}")
-            else:
-                print(f"Пользователь {member.id} уже не на сервере или не имеет роли мута")
-                
-        except Exception as e:
-            print(f"Ошибка при снятии мута: {e}")
-            
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав для мута этого пользователя!",
-            ephemeral=True)
-    except discord.HTTPException as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
-            ephemeral=True)
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка при муте: {e}",
-            ephemeral=True)
+                    print(f"❌ Ошибка отправки сообщения об авто-разблокировке: {e}")
 
-@bot.tree.command(name='освободить', description='Вернуть пользователю право общения.')
-@app_commands.guild_only()
-@app_commands.default_permissions(moderate_members=True)
-async def unmute_member(interaction: discord.Interaction, member: discord.Member):
-    if not interaction.user.guild_permissions.moderate_members:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на снятие мута!", ephemeral=True)
-        return
-    mute_role = interaction.guild.get_role(MUTED_ROLE)
-    if not mute_role:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Роль MUTED_ROLE не найдена!",
-            ephemeral=True)
-        return
-    await interaction.response.defer()
-    # ✅ Получаем канал логов
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
+        # Запуск таймера в фоновом режиме
+        asyncio.create_task(auto_unlock())
 
-    # ✅ Получаем безопасные данные пользователя
-    user = await safe_fetch_user(interaction.client, member.id)
-    user_mention = user.mention if user else member.mention
-    user_avatar = user.display_avatar.url if user.display_avatar else None
-    # ✅ Проверяем, есть ли мут
-    if mute_role not in member.roles:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> У этого пользователя нет мута!",
-            ephemeral=True)
-        return
-    try:
-        # ✅ Снимаем мут
-        await member.remove_roles(mute_role, reason=f"Досрочное снятие мута (Модератор: {interaction.user})")
-        # ✅ Отправляем сообщение
-        await safe_send(interaction, f"<:unmuteemoji:1515698075367112857> {user_mention} **зᴀᴋончиᴧ ᴄᴩоᴋ** доᴄᴩочно!", ephemeral=False)
-        if log_channel:
+    @app_commands.command(name='выгнать', description='Выгнать пользователя.')
+    @app_commands.guild_only()
+    @app_commands.choices(rule=BotConfig.RULE_CHOICES)
+    @app_commands.describe(member="Участник, которого нужно выгнать", rule="Выберите нарушенный пункт правил", reason="Дополнительное примечание")
+    @moderation_only(BotConfig.SUPPORT_ROLES['second_order']+BotConfig.SUPPORT_ROLES['third_order'])
+    async def kick_member(self, interaction: discord.Interaction, member: discord.Member, rule: app_commands.Choice[str], reason: str = "Не указана"):    
+        await commands_func.kick_func(interaction, member, rule.value, reason)
+
+    @app_commands.command(name='нейтрализовать', description='Забанить пользователя.')
+    @app_commands.guild_only()
+    @app_commands.choices(rule=BotConfig.RULE_CHOICES)
+    @app_commands.describe(member="Участник, которого нужно забанить", rule="Выберите нарушенный пункт правил", reason="Дополнительное примечание")
+    @moderation_only(BotConfig.SUPPORT_ROLES['second_order']+BotConfig.SUPPORT_ROLES['third_order'])
+    async def ban_member(self, interaction: discord.Interaction, member: discord.Member, rule: app_commands.Choice[str], reason: str = "Не указана"):
+        await commands_func.ban_func(interaction, member, rule.value, reason)
+
+    @app_commands.command(name='аппелировать', description='Разбанить пользователя.')
+    @app_commands.guild_only()
+    @app_commands.describe(name_or_id="Айди пользователя")
+    @moderation_only(BotConfig.SUPPORT_ROLES['third_order'])
+    async def unban_member(self, interaction: discord.Interaction, name_or_id: str):
+        await commands_func.unban_func(interaction, name_or_id)
+        
+    @app_commands.command(name='арестовать', description='Ограничить пользователю право общаться.')
+    @app_commands.guild_only()
+    @app_commands.choices(rule=BotConfig.RULE_CHOICES)
+    @app_commands.describe(member="Участник, которого нужно замутить", minutes="Время мута", rule="Выберите нарушенный пункт правил", reason="Дополнительное примечание")
+    @moderation_only()
+    async def mute_member(self, interaction: discord.Interaction, member: discord.Member, minutes: app_commands.Range[int, 10, 1440], rule: app_commands.Choice[str], reason: str = "Не указана"):
+        await commands_func.mute_func(interaction, member, minutes, rule.value, reason)
+        
+    @app_commands.command(name='освободить', description='Вернуть пользователю право общения.')
+    @app_commands.guild_only()
+    @app_commands.describe(member="Участник, которого следует размутить", reason="Причина размута")
+    @moderation_only()
+    async def unmute_member(self, interaction: discord.Interaction, member: discord.Member, reason: str):
+        await commands_func.unmute_func(interaction, member, reason)
+
+    @app_commands.command(name='выдать_предупреждение', description='Выдать предупреждение пользователю.')
+    @app_commands.guild_only()
+    @app_commands.choices(rule=BotConfig.RULE_CHOICES)
+    @app_commands.describe(member="Участник, которому нужно выдать предупреждение", rule="Выберите нарушенный пункт правил", reason="Дополнительное примечание")
+    @moderation_only(BotConfig.SUPPORT_ROLES['second_order']+BotConfig.SUPPORT_ROLES['third_order'])
+    async def warn_member(self, interaction: discord.Interaction, member: discord.Member, rule: app_commands.Choice[str], reason: str ="Не указана"):
+        await commands_func.warn_func(interaction, member, rule.value, reason)
+
+    @app_commands.command(name='снять_предупреждение', description='Снять предупреждение с пользователя.')
+    @app_commands.guild_only()
+    @app_commands.describe(member="Участник, которому нужно снять предупреждение")
+    @moderation_only(BotConfig.SUPPORT_ROLES['second_order']+BotConfig.SUPPORT_ROLES['third_order'])
+    async def unwarn_member(self, interaction: discord.Interaction, member: discord.Member):
+        await commands_func.unwarn_member(interaction, member)
+
+    # ========== КОМАНДЫ НАСТРОЙКИ ==========
+
+    @app_commands.command(name='sync', description='Синхронизировать команды.')
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def sync(self, interaction: discord.Interaction):
+        if interaction.user.id != BotConfig.DEVELOPER_ID:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> У тебя нет прав для этой команды.", ephemeral=True)
+            return
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync(guild=None)
+        await safe_send(interaction, "<:grantedemoji:1520173483299049623> Команды синхронизированы для текущего сервера.", ephemeral=False)
+
+    @app_commands.command(name='status', description='Статус бота.')
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def status_of_bot(self, interaction: discord.Interaction):
+        if interaction.user.id != BotConfig.DEVELOPER_ID:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> У тебя нет прав для этой команды.", ephemeral=True)
+            return
+        await safe_send(Interaction, f"{interaction.user.mention}, бот ещё жив! <:grantedemoji:1520173483299049623>", delete_after=5)
+
+    # ========== КОМАНДЫ ПОМОЩИ ==========
+
+    @app_commands.command(name="create_ticket", description="Создать панель тикета.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def create_ticket(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AdminSetupModal(channel=interaction.channel))
+
+    @app_commands.command(name="verification", description="Создать сообщение для верификации.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(channel="Канал для отправки", role="Роль для выдачи")
+    async def verification_button(self, interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role):
+        if interaction.user.id != BotConfig.DEVELOPER_ID:
+            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> У тебя нет прав.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title="<:verifiedemoji:1525207492928213204> ʙᴇᴩиɸиᴋᴀция",
+            description="**нᴀжʍиᴛᴇ нᴀ ᴋноᴨᴋу ᴄнизу <:grantedemoji:1520173483299049623>**, чᴛобы ᴨоᴧучиᴛь доᴄᴛуᴨ ᴋ ᴄᴇᴩʙᴇᴩу!\n**ᴄᴛᴀндᴀᴩᴛнᴀя ᴨᴩоʙᴇᴩᴋᴀ** нᴀ ᴨоᴧьзоʙᴀᴛᴇᴧя, дᴧя оᴛᴋᴩыᴛия ᴋᴀнᴀᴧоʙ нᴀжʍиᴛᴇ ᴩᴇᴀᴋцию.",
+            color=discord.Color.brand_green())
+        embed.add_field(name="<:rolesemoji:1517494151086866522> Вы получите роль", value=role.mention, inline=False)
+        embed.set_image(url='https://i.pinimg.com/originals/90/9c/40/909c405bc363f250d247f14ac0c89818.gif?nii=t')
+        embed.set_footer(text='𝐅𝐈𝐆𝐇𝐓 𝐂𝐋𝐔𝐁 • 𝐕𝐞𝐫𝐢𝐟𝐢𝐜𝐚𝐭𝐢𝐨𝐧', icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+        
+        await channel.send(embed=embed, view=VerificationView(role.id))
+        await safe_send(interaction, f"Верификация создана в {channel.mention}!", ephemeral=True)
+
+class InfoCommands(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+        # Инициализируем контекстные меню через создание объектов ContextMenu
+        self.info_context_menu = app_commands.ContextMenu(
+            name="информация о пользователе",
+            callback=self.show_info_user
+        )
+        self.reputation_context_menu = app_commands.ContextMenu(
+            name="репутация о пользователе",
+            callback=self.show_user_reputation
+        )
+        self.level_context_menu = app_commands.ContextMenu(
+            name="уровень/опыт пользователя",
+            callback=self.level_command
+        )
+        self.last_purge_date = None
+
+    async def cog_load(self):
+        # Регистрируем меню в дереве команд бота при загрузке Кога
+        self.bot.tree.add_command(self.info_context_menu)
+        self.bot.tree.add_command(self.reputation_context_menu)
+        self.bot.tree.add_command(self.level_context_menu)
+
+    def cog_unload(self):
+        # Удаляем контекстные меню при выгрузке кога, чтобы избежать дублирования
+        self.bot.tree.remove_command(self.info_context_menu.name, type=self.info_context_menu.type)
+        self.bot.tree.remove_command(self.reputation_context_menu.name, type=self.reputation_context_menu.type)
+        self.bot.tree.remove_command(self.level_context_menu.name, type=self.level_context_menu.type)
+    
+    # ========== КОМАНДЫ ДЛЯ ИНФОРМАЦИИ ==========
+
+    @app_commands.command(name='userinfo', description='Узнайте информацию об пользователе.')
+    @app_commands.guild_only()
+    async def user_info(self, interaction: discord.Interaction, member: discord.Member = None):
+        await commands_func.user_info_func(interaction, member)
+
+    @app_commands.command(name="serverinfo", description="Узнайте информацию о сервере.")
+    @app_commands.guild_only()
+    async def server_info(self, interaction: discord.Interaction):
+        # Проверка каналов
+        allowed_channels = [
+            BotConfig.CHANNELS.get("commands"),
+            BotConfig.CHANNELS.get("mod_commands"),
+        ]
+
+        if interaction.channel.id not in allowed_channels:
+            await safe_send(
+                interaction,
+                "<:forbiddenemoji:1515780232404144279> Эта команда работает только в"
+                f" канале <#{BotConfig.CHANNELS['commands']}>!",
+                ephemeral=True,
+            )
+            return
+
+        guild = interaction.guild
+
+        # 1. Безопасное получение владельца (если нет в кэше)
+        owner = guild.owner
+        if not owner:
             try:
-                embed = discord.Embed(
-                    title="<:unmuteemoji:1515698075367112857> /освободить",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>",
-                    color=discord.Color.brand_green(),
-                    timestamp=interaction.created_at
-                )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-                
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав для снятия мута с этого пользователя!",
-            ephemeral=True)
-    except discord.HTTPException as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
-            ephemeral=True)
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка при снятии мута: {e}",
-            ephemeral=True)
+                owner = await guild.fetch_owner()
+            except discord.HTTPException:
+                owner = None
 
-@bot.tree.command(name='выдать_предупреждение', description='Выдать предупреждение пользователю.')
-@app_commands.guild_only()
-@app_commands.default_permissions(moderate_members=True, ban_members=True)
-async def warn_member(interaction: discord.Interaction, member: discord.Member, reason: str ="Не указана"):
-    """Выдает предупреждение"""
-    if not interaction.user.guild_permissions.moderate_members or not interaction.user.guild_permissions.ban_members:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на выдачу предупреждений!", ephemeral=True)
-        return
-    if member.bot:
-        await safe_send(interaction, "🤖 Нельзя модерировать бота!", ephemeral=True)
-        return
-    if member == interaction.user:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя модерировать самого себя!", ephemeral=True)
-        return
-    if member.guild_permissions.administrator:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя выдавать предупреждение администратору!", ephemeral=True)
-        return
-    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нельзя выдать предупреждение пользователю с ролью выше вашей!",
-            ephemeral=True)
-        return
-    
-    # ✅ Получаем канал логов
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
-    
-    # ✅ Получаем безопасные данные пользователя
-    user = await safe_fetch_user(interaction.client, member.id)
-    user_mention = user.mention if user else member.mention
-    user_avatar = user.display_avatar.url if user.display_avatar else None
-    try:
-        # ✅ Выдаем предупреждение
-        new_warns = await warn_user(interaction, member, reason)
-        if log_channel:
-            try:
-                embed = discord.Embed(
-                    title="<:warnemoji:1515687856549658774> /выдать_предупреждение",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>\n"
-                                f"`ʙᴀᴩноʙ ᴛᴇᴨᴇᴩь`: {new_warns} <:warningemoji:1515756604178305054>\n"
-                                f"`ᴨᴩичинᴀ`: {reason} <:clearemoji:1515691240476377218>",
-                    color=discord.Color.brand_red(),
-                    timestamp=interaction.created_at
-                )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-                
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав для выдачи предупреждения этому пользователю!",
-            ephemeral=True)
-    except discord.HTTPException as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
-            ephemeral=True)
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка при выдаче предупреждения: {e}",
-            ephemeral=True)
+        owner_mention = owner.mention if owner else "Неизвестно"
 
-@bot.tree.command(name='снять_предупреждение', description='Снять предупреждение с пользователя.')
-@app_commands.guild_only()
-@app_commands.default_permissions(moderate_members=True, ban_members=True)
-async def unwarn_member(interaction: discord.Interaction, member: discord.Member):
-    if not interaction.user.guild_permissions.moderate_members or not interaction.user.guild_permissions.ban_members:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> У вас нет прав на выдачу предупреждений!", ephemeral=True)
-        return
-    if member.bot:
-        await safe_send(interaction, "🤖 Нельзя модерировать бота!", ephemeral=True)
-        return
-    if member == interaction.user:
-        await safe_send(interaction, "<:forbbiden2emoji:1517479332866429008> Нельзя модерировать самого себя!", ephemeral=True)
-        return
-    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нельзя убирать предупреждение пользователю с ролью выше вашей!",
-            ephemeral=True)
-        return
-    # ✅ Получаем данные пользователя
-    try:
-        user_data = await manager.get_user_ruler(member.id)
-    except Exception as e:
-        await safe_send(interaction, f"<:forbbiden2emoji:1517479332866429008> Ошибка получения данных: {e}", ephemeral=True)
-        return
-    if not user_data:
-        await safe_send(interaction, f"<:forbbiden2emoji:1517479332866429008> Пользователь {member.mention} не найден в базе!", ephemeral=True)
-        return
-    current_warns = user_data.get("warnings", 0)
-    if current_warns <= 0:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> {member.mention} не имеет предупреждений.",
-            ephemeral=True)
-        return
-    # ✅ Получаем канал логов
-    log_channel = await safe_fetch_channel(interaction.client, MOD_LOGS_COMMANDS)
-    
-    # ✅ Получаем безопасные данные пользователя
-    user = await safe_fetch_user(interaction.client, member.id)
-    user_mention = user.mention if user else member.mention
-    user_avatar = user.display_avatar.url if user.display_avatar else None
-    # ✅ Роли
-    roles = {
-        1: FIRST_WARN_ROLE,
-        2: SECOND_WARN_ROLE,
-        3: THIRD_WARN_ROLE}
-    try:
-        # ✅ Снимаем текущую роль предупреждения
-        current_role_id = roles.get(current_warns)
-        if current_role_id:
-            current_role = interaction.guild.get_role(current_role_id)
-            if current_role and current_role in member.roles:
-                await member.remove_roles(current_role)
-        new_warns = current_warns - 1
-        
-        if new_warns > 0:
-            prev_role_id = roles.get(new_warns)
-            if prev_role_id:
-                prev_role = interaction.guild.get_role(prev_role_id)
-                if prev_role:
-                    await member.add_roles(prev_role)
-        else:
-            # ✅ Снимаем категорию предупреждений
-            category_role = interaction.guild.get_role(WARNINGS_CATEGORY_ROLE)
-            if category_role and category_role in member.roles:
-                await member.remove_roles(category_role)
-        
-        # ✅ Обновляем данные в базе
-        await manager.update_user_ruler(
-            member.id,
-            new_warns,
-            user_data.get('reputation', 0),
-            user_data.get('last_time_reputation', None))
-        
-        # ✅ Отправляем сообщение
-        await safe_send(interaction, f"<:unbanemoji:1515696568156557433> {user_mention} **ᴀᴨᴨᴇᴧᴧиᴩоʙᴀн**. оᴄᴛᴀᴧоᴄь ᴨᴩᴇдуᴨᴩᴇждᴇний: **{new_warns}** <:warningemoji:1515756604178305054>", ephemeral=False)
-        if log_channel:
-            try:
-                embed = discord.Embed(
-                    title="<:unbanemoji:1515696568156557433> /снять_предупреждение",
-                    description=f"`ʍодᴇᴩᴀᴛоᴩ`: {interaction.user.mention} <:forbbiden2emoji:1517479332866429008>\n"
-                                f"`ᴨоᴧьзоʙᴀᴛᴇᴧь`: {user_mention} <:reputationemoji:1517480379286556832>\n"
-                                f"`ʙᴀᴩноʙ оᴄᴛᴀᴧоᴄь`: {new_warns} <:warningemoji:1515756604178305054>",
-                    color=discord.Color.brand_green(),
-                    timestamp=interaction.created_at
-                )
-                if user_avatar:
-                    embed.set_thumbnail(url=user_avatar)
-                await safe_send(log_channel, embed=embed)
-            except Exception as e:
-                print(f"Ошибка отправки лога: {e}")
-                
-    except discord.Forbidden:
-        await safe_send(
-            interaction,
-            "<:forbbiden2emoji:1517479332866429008> Нет прав для снятия предупреждения с этого пользователя!",
-            ephemeral=True)
-    except discord.HTTPException as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка: {e}",
-            ephemeral=True)
-    except Exception as e:
-        await safe_send(
-            interaction,
-            f"<:forbbiden2emoji:1517479332866429008> Ошибка при снятии предупреждения: {e}",
-            ephemeral=True)
+        # 2. Подсчет ботов и обычных участников
+        bots_count = sum(1 for m in guild.members if m.bot)
+        humans_count = guild.member_count - bots_count
 
-# @bot.tree.command(name='modpanel', description='Панель модерации.')
-# @app_commands.default_permissions(administrator=True)
-# async def mod_panel(interaction: discord.Interaction, member: discord.Member = None):
-#     """Открывает панель модерации для участника"""
-#     if member is None:
-#         await interaction.response.send_message("<:forbbiden2emoji:1517479332866429008> Укажите участника: `/modpanel @user`", ephemeral=True)
-#         return
-#     if member.bot:
-#         await interaction.response.send_message("🤖 Нельзя модерировать бота!", ephemeral=True)
-#         return
-#     if member == interaction.user:
-#         await interaction.response.send_message("<:forbbiden2emoji:1517479332866429008> Нельзя модерировать самого себя!", ephemeral=True)
-#         return
-#     if member.guild_permissions.administrator:
-#         await interaction.response.send_message("<:forbbiden2emoji:1517479332866429008> Нельзя модерировать администратора!", ephemeral=True)
-#         return
-#     joined_timestamp = int(member.joined_at.timestamp())
-#     embed = discord.Embed(
-#         title="🛡️ The moderation panel",
-#         description=f"Действия для {member.mention}",
-#         color=discord.Color.blue()
-#     )
-#     embed.add_field(name="ID", value=member.id, inline=True)
-#     embed.add_field(name="Имя", value=member.display_name, inline=True)
-#     embed.add_field(name="Дата присоединения", value=f'<t:{joined_timestamp}:F>', inline=True)
-    
-#     view = ModPanel(interaction.user, member)
-#     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        # 3. Детализация каналов
+        text_channels = len(guild.text_channels)
+        voice_channels = len(guild.voice_channels)
 
-# ========== КОМАНДЫ ДЛЯ ИНФОРМАЦИИ ==========
+        # 4. Форматирование времени создания
+        created_timestamp = int(guild.created_at.timestamp())
 
-@bot.tree.command(name='userinfo', description='Узнайте информацию об пользователи.')
-@app_commands.guild_only()
-async def user_info(interaction: discord.Interaction, member: discord.Member = None):
-    if interaction.channel.id != COMMANDS_CHANNEL and interaction.channel.id != MOD_COMMANDS_CHANNEL:
-        await safe_send(interaction, f"<:forbbiden2emoji:1517479332866429008> Эта команда работает только в канале <#{COMMANDS_CHANNEL}>!", ephemeral=True)
-        return
-    if member is not None and member.bot:
-        await safe_send(interaction, "🤖 Нельзя использовать команду на боте!", ephemeral=True)
-        return
-    target_member = member or interaction.user
-    # Получаем UNIX timestamp (секунды, а не миллисекунды)
-    user_data = await manager.get_user_ruler(target_member.id)
-    joined_timestamp = int(target_member.joined_at.timestamp())
-    created_timestamp = int(target_member.created_at.timestamp())
-    embed = discord.Embed(
-        title=f"<:techicalemoji:1515678259767939262> ɪɴꜰᴏʀᴍᴀᴛɪᴏɴ ᴀʙᴏᴜᴛ {target_member.display_name}",
-        color=discord.Color.darker_grey())
-    embed.set_thumbnail(url=target_member.avatar.url if target_member.avatar else target_member.default_avatar.url)
-    embed.add_field(name="ɪᴅ <:peopleemoji:1517486620939649044>", value=target_member.id, inline=True)
-    embed.add_field(name="иʍя ᴨоᴧьзоʙᴀᴛᴇᴧя <:coolemoji:1517487042018410577>", value=target_member.name, inline=True)
-    embed.add_field(name="ʀᴇᴘᴜᴛᴀᴛɪᴏɴ <:reputationemoji:1517480379286556832>", value=user_data.get("reputation", 0), inline=True)
-    embed.add_field(name="ᴀᴋᴋᴀунᴛ ᴄоздᴀн", value=f'<t:{created_timestamp}:f>', inline=True)
-    embed.add_field(name="ᴨᴩиᴄоᴇдиниᴧᴄя", value=f'<t:{joined_timestamp}:f>', inline=True)
-    
-    await safe_send(interaction, embed=embed, ephemeral=False)
+        # 5. Сборка Embed
+        embed = discord.Embed(
+            title=f"<:techicalemoji:1515678259767939262> {guild.name}",
+            description=guild.description or "Описание отсутствует.",
+            color=discord.Color.darker_grey(),
+        )
 
-@bot.tree.command(name='serverinfo', description='Узнайте информацию о сервере.')
-@app_commands.guild_only()
-async def server_info(interaction: discord.Interaction):
-    """Показывает информацию о сервере"""
-    if interaction.channel.id != COMMANDS_CHANNEL and interaction.channel.id != MOD_COMMANDS_CHANNEL:
-        await safe_send(interaction, f"<:forbbiden2emoji:1517479332866429008> Эта команда работает только в канале <#{COMMANDS_CHANNEL}>!", ephemeral=True)
-        return
-    created_timestamp = int(interaction.guild.created_at.timestamp())
-    guild = interaction.guild
-    embed = discord.Embed(
-        title=f'<:techicalemoji:1515678259767939262> {guild.name}',
-        description=guild.description or "Нет описания",
-        color=discord.Color.darker_grey()
-    )
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
-    embed.add_field(name="ɪᴅ <:peopleemoji:1517486620939649044>", value=guild.id, inline=True)
-    embed.add_field(name="ʙᴧᴀдᴇᴧᴇц <:owneremoji:1517494149119611063", value=guild.owner.mention, inline=True)
-    embed.add_field(name="учᴀᴄᴛниᴋоʙ <:coolemoji:1517487042018410577>", value=guild.member_count, inline=True)
-    embed.add_field(name="ᴋᴀнᴀᴧоʙ <:clearemoji:1515691240476377218>", value=len(guild.channels), inline=True)
-    embed.add_field(name="ᴩоᴧᴇй <:rolesemoji:1517494151086866522>", value=len(guild.roles), inline=True)
-    embed.add_field(name="дᴀᴛᴀ ᴄоздᴀния <:techicalemoji:1515678259767939262>", value=f"<t:{created_timestamp}:D>", inline=True)
-    
-    await safe_send(interaction, embed=embed, ephemeral=False)
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
 
-@bot.tree.command(name='репутация', description='Узнайте репутацию пользователя.')
-@app_commands.guild_only()
-async def user_reputation(interaction: discord.Interaction, member: discord.Member = None):
-    if interaction.channel.id != COMMANDS_CHANNEL and interaction.channel.id != MOD_COMMANDS_CHANNEL:
-        await safe_send(interaction, f"<:forbbiden2emoji:1517479332866429008> Эта команда работает только в канале <#{COMMANDS_CHANNEL}>!", ephemeral=True)
-        return
-    if member is not None and member.bot:
-        await safe_send(interaction, "🤖 Нельзя использовать команду на боте!", ephemeral=True)
-        return
-    target_member = member or interaction.user
-    user_data = await manager.get_user_ruler(target_member.id)
-    reputation = user_data.get("reputation", 0)
-    embed = discord.Embed(
-        title=f"<:peopleemoji:1517486620939649044> {target_member.display_name}'s ʀᴇᴘᴜᴛᴀᴛɪᴏɴ",
-        description=f"у ᴨоᴧьзоʙᴀᴛᴇᴧя **{reputation} очᴋоʙ ᴩᴇᴨуᴛᴀции** <:reputationemoji:1517480379286556832>\nдᴧя уʙᴇᴧичᴇния чьᴇй-ᴛо ᴩᴇᴨуᴛᴀции иᴄᴨоᴧьзуйᴛᴇ `+rep @User`",
-        color=discord.Color.darker_grey()
-    )
-    embed.set_thumbnail(url=target_member.avatar.url if target_member.avatar else target_member.default_avatar.url)
-    
-    await safe_send(interaction, embed=embed, ephemeral=False)
+        # Добавляем баннер сервера, если он есть (буст 2+ уровня)
+        if guild.banner:
+            embed.set_image(url=guild.banner.url)
 
-@bot.tree.command(name="левел", description="Показать карточку уровня и опыта участника.")
-@app_commands.guild_only()
-@app_commands.describe(member="Выберите участника сервера, чтобы посмотреть его уровень (необязательно)")
-async def level_command(interaction: discord.Interaction, member: discord.Member = None):
-    if interaction.channel.id != COMMANDS_CHANNEL and interaction.channel.id != MOD_COMMANDS_CHANNEL:
-        await safe_send(interaction, f"<:forbbiden2emoji:1517479332866429008> Эта команда работает только в канале <#{COMMANDS_CHANNEL}>!", ephemeral=True)
-        return
-    if member is not None and member.bot:
-        await safe_send(interaction, "🤖 Нельзя использовать команду на боте!", ephemeral=True)
-        return
-    await interaction.response.defer()
-    
-    target_member = member or interaction.user
-    
-    data = await manager.get_user_data(target_member.id)
-    user_level = data.get("level", 0)
-    current_xp = data.get("xp", 0)
-    role_name = data.get("role", None)
-    next_level_xp = await manager.get_xp_needed(user_level)
-    
-    if role_name == "Нет роли" or not role_name:
-        for lvl, r_id in sorted(LEVEL_ROLES.items(), reverse=True):
-            if user_level >= lvl:
-                role = interaction.guild.get_role(r_id)
-                if role:
-                    role_name = role.name
-                    break
+        embed.add_field(
+            name="ɪᴅ <:peopleemoji:1517486620939649044>",
+            value=f"`{guild.id}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="ʙᴧᴀдᴇᴧᴇц <:owneremoji:1517494149119611063>",
+            value=owner_mention,
+            inline=True,
+        )
+        embed.add_field(
+            name="дᴀᴛᴀ ᴄоздᴀния <:techicalemoji:1515678259767939262>",
+            value=f"<t:{created_timestamp}:D> (<t:{created_timestamp}:R>)",
+            inline=True,
+        )
 
-    avatar_url = target_member.display_avatar.url
+        embed.add_field(
+            name="учᴀᴄᴛниᴋи <:coolemoji:1517487042018410577>",
+            value=(
+                f"Всего: **{guild.member_count}**\n👥 Людей:"
+                f" **{humans_count}**\n🤖 Ботов: **{bots_count}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="ᴋᴀнᴀᴧы <:clearemoji:1515691240476377218>",
+            value=(
+                f"Всего: **{len(guild.channels)}**\n💬 Текстовых:"
+                f" **{text_channels}**\n🔊 Голосовых: **{voice_channels}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="буᴄᴛы <:insaneemoji:1526218299313098752>",
+            value=(
+                f"Уровень: **{guild.premium_tier}**\nБустов:"
+                f" **{guild.premium_subscription_count or 0}**"
+            ),
+            inline=True,
+        )
+
+        embed.set_footer(
+            text=f"𝐅𝐈𝐆𝐇𝐓 𝐂𝐋𝐔𝐁 • Запросил: {interaction.user.display_name}",
+            icon_url=interaction.guild.icon.url if interaction.guild.icon else None,)
+
+        await safe_send(interaction, embed=embed, ephemeral=False)
+
+    @app_commands.command(name='репутация', description='Узнайте репутацию пользователя.')
+    @app_commands.guild_only()
+    async def user_reputation(self, interaction: discord.Interaction, member: discord.Member = None):
+        await commands_func.reputation_info_func(interaction, member)
+
+    @app_commands.command(name="левел", description="Показать карточку уровня и опыта участника.")
+    @app_commands.guild_only()
+    @app_commands.describe(member="Выберите участника сервера, чтобы посмотреть его уровень (необязательно)")
+    async def level_command(self, interaction: discord.Interaction, member: discord.Member = None):
+        await commands_func.level_info_func(interaction, member)
     
-    try:
-        image_buf = await generate_level_card(
-            username=target_member.display_name,
-            avatar_url=avatar_url,
-            level=user_level,
-            current_xp=current_xp,
-            next_level_xp=next_level_xp,
-            role_name=role_name)
-        discord_file = discord.File(fp=image_buf, filename="level_card.png")
-        await safe_send(interaction, file=discord_file)
-        
-    except Exception as e:
-        # Если что-то сломается внутри генерации картинки, бот сообщит об этом, а не зависнет
-        print(f"Ошибка при отправке карточки уровня: {e}")
-        await safe_send(interaction, "Произошла ошибка при генерации карточки уровня.", ephemeral=True)
+    # ========== БЫСТРЫЕ ДЕЙСТВИЯ ==========
+
+    async def show_info_user(self, interaction: discord.Interaction, member: discord.Member):
+        """Внутренний колбэк для контекстного меню информации об участнике."""
+        await commands_func.user_info_func(interaction, member)
+
+    async def show_user_reputation(self, interaction: discord.Interaction, member: discord.Member):
+        """Внутренний колбэк для контекстного меню репутации."""
+        await commands_func.reputation_info_func(interaction, member)
+
+    async def level_command(self, interaction: discord.Interaction, member: discord.Member):
+        """Внутренний колбэк для контекстного меню уровней."""
+        await commands_func.level_info_func(interaction, member)
 
 # ========== ТЕКСТОВЫЕ СОБЫТИЕ ==========
 
 @bot.event
-async def on_message(message):
-    if not message.guild:
+async def on_message(message: discord.Message):
+    # 1. Игнорируем ЛС и ботов (включая самого бота)
+    if not message.guild or message.author.bot:
         return
+
     user_id = message.author.id
-    # ПРОВЕРКА БОТОВ
-    if message.author.bot:
-        if user_id not in trusted_bots:
-            user = await safe_fetch_user(bot, user_id)
-            if user:
-                user_name = user.name
-            else:
-                user_name = message.author.name
-            
-            # ✅ Получаем Member из гильдии
-            member = message.guild.get_member(user_id)
-            if member:
-                try:
-                    await member.ban(reason=f"Неавторизованный бот (Автоматический бан)", delete_message_days=1)
-                except discord.Forbidden:
-                    print(f"❌ Нет прав для бана бота {user_name}")
-                except discord.HTTPException as e:
-                    print(f"❌ Ошибка при бане бота: {e}")
-                except Exception as e:
-                    print(f"❌ Неизвестная ошибка: {e}")
-            else:
-                # Если бот не на сервере - используем guild.ban()
-                try:
-                    await message.guild.ban(user, reason=f"Неавторизованный бот (Автоматический бан)", delete_message_days=1)
-                except Exception as e:
-                    print(f"❌ Ошибка бана через guild.ban(): {e}")
-        return
-    # СОСТОЯНИЕ БОТОВ
-    if bot.user in message.mentions and user_id == DEVELOPER_ID:
-        await safe_send(message, f"{message.author.mention}, бот ещё жив! <:grantedemoji:1520173483299049623>", delete_after=5)
-    # +REP СИСТЕМА
-    if message.content == "+rep":
-        if message.mentions:
-            target_user = message.mentions[0]
-            if target_user.id == user_id:
-                await safe_reply(message, "<:forbbiden2emoji:1517479332866429008> Вы не можете дать репутацию самому себе!", delete_after=5)
-                await safe_delete(message, delay=2)
-                return
-            user_data = await manager.get_user_ruler(target_user.id)
-            current_time = time.time()
-    
-            time_passed = current_time - user_data["last_time_reputation"]
-            if time_passed < 21600:
-                seconds_left = int(21600 - time_passed)
-                hours = seconds_left // 3600
-                minutes = (seconds_left % 3600) // 60
-                await safe_reply(message, f"**<:forbbiden2emoji:1517479332866429008> {message.author.mention}, вы не можете часто использовать эту команду!**\n⌛ Осталось: **{hours} ч. {minutes} мин.**", delete_after=5)
-                return
-            new_reputation = int(user_data["reputation"]+1)
-            await manager.update_user_ruler(target_user.id, user_data["warnings"], new_reputation, current_time)
-            await safe_reply(message, f"{message.author.mention} ʙыдᴀᴧ ᴩᴇᴨуᴛᴀцию {target_user.mention}! <:reputationemoji:1517480379286556832>", delete_after=60)
-            return
-        else:
-            await safe_reply(message, "<:forbbiden2emoji:1517479332866429008> Укажите пользователя! Пример: `+rep @User`", delete_after=5)
-            await safe_delete(message, delay=2)
-            return
-    # LEVEL UP СИСТЕМА
-    data = await manager.get_user_data(user_id)
-
-    current_xp = int(data.get("xp", 0) + random.randint(5, 10))
-    current_level = data.get("level", 0)
-    current_role = data.get("role", None)
-
-    xp_needed = await manager.get_xp_needed(current_level)
-
-    leveled_up = False
-    while current_xp >= xp_needed:
-        current_xp -= xp_needed
-        current_level += 1
-        xp_needed = await manager.get_xp_needed(current_level)
-        leveled_up = True
-
-    if leveled_up:
-        await safe_send(message, f"<:congrantemoji:1517514349965475954> {message.author.mention}, ʙы доᴄᴛиᴦᴧи **{current_level}** уᴩоʙня!", delete_after=10)
-        if current_level in LEVEL_ROLES:
-            target_role_id = LEVEL_ROLES[current_level]
-            guild = message.guild
-            role = guild.get_role(target_role_id)
-            
-            if role:
-                current_role = role.name
-                try:
-                    await message.author.add_roles(role)
-                except discord.Forbidden:
-                    print(f"Ошибка: Проверьте иерархию ролей! Бот не может выдать роль '{role.name}'")
-    await manager.update_user_data(user_id, current_xp, current_level, current_role)
-    # ПРОВЕРКА НА АДМИНИСТРАТОРА
-    if message.guild and message.author.guild_permissions.administrator:
-        await bot.process_commands(message)
-        return
-    # ПРОВЕРКА НА ССЫЛКИ
-    content_lower = message.content.lower()
-    match = re.search(URL_REGEX, content_lower)
-    if match and match.group():  # ✅ Проверяем, что match существует
-        is_gif = any(re.search(pattern, match.group()) for pattern in AVAILABLE_PATTERNS)
-        if not is_gif:
-            try:
-                await safe_delete(message)
-                view = WarningView(user_id=user_id)
-                await safe_send(message, 
-                    f"<:clearemoji:1515691240476377218> {message.author.mention}, ʙᴀɯᴇ ᴄообщᴇниᴇ удᴀᴧᴇно.", 
-                    view=view, 
-                    delete_after=10)
-            except (discord.Forbidden, discord.NotFound):
-                pass
-    # ПРОВЕРКА НА СПАМ
-    if await anti_spam.is_muted(message.author):
-        await safe_delete(message)
-        return
     current_time = time.time()
-    if anti_spam.is_spam(user_id, current_time):
-        await safe_delete(message)
-        warnings = anti_spam.add_spam_warning(user_id)
-        if warnings == 1:
-            await safe_dm_send(message.author.id, "<:warningemoji:1515756604178305054> **ᴨᴩᴇдуᴨᴩᴇждᴇниᴇ!** нᴇ ᴄᴨᴀʍьᴛᴇ ʙ чᴀᴛᴇ!\nᴄᴧᴇдующᴇᴇ нᴀᴩуɯᴇниᴇ - ʍуᴛ нᴀ 5 ʍинуᴛ.")
-            await safe_send(message.channel, f"<:warningemoji:1515756604178305054> {message.author.mention}, нᴇ ᴄᴨᴀʍьᴛᴇ ʙ чᴀᴛᴇ! ", delete_after=5)
-        elif warnings == 2:
-            await anti_spam.mute_user(message.author, 300)
-            await safe_dm_send(message.author.id, "<:muteemoji:1515688038867538000> ʙы **зᴀдᴇᴩжᴀны** нᴀ 5 ʍинуᴛ зᴀ ᴄᴨᴀʍ!")
-            await safe_send(message.channel, f"<:muteemoji:1515688038867538000> {message.author.mention} **зᴀдᴇᴩжᴀн** нᴀ 5 ʍинуᴛ зᴀ ᴄᴨᴀʍ!")
-        elif warnings == 3:
-            await anti_spam.mute_user(message.author, 1800)
-            await safe_dm_send(message.author.id, "<:muteemoji:1515688038867538000> ʙы **зᴀдᴇᴩжᴀны** нᴀ 30 ʍинуᴛ зᴀ ᴨоʙᴛоᴩный ᴄᴨᴀʍ!")
-            await safe_send(message.channel, f"<:muteemoji:1515688038867538000> {message.author.mention} **зᴀдᴇᴩжᴀн** нᴀ 30 ʍинуᴛ зᴀ ᴨоʙᴛоᴩный ᴄᴨᴀʍ!")
-        elif warnings == 4:
-            await message.author.kick(reason="Спам после нескольких предупреждений")
-            await safe_send(message.channel, f"<:kickemoji:1515693208783425617> {message.author.mention} **ʙᴩᴇʍᴇнно оᴛᴄᴛᴩᴀнён** зᴀ ᴄᴨᴀʍ!")
-        elif warnings >= 5:
-            await message.author.ban(reason="Многократный спам", delete_message_days=1)
-            await safe_send(message.channel, f"<:neutralizeemoji:1515694760990347325> {message.author.mention} **быᴧ нᴇйᴛᴩᴀᴧизоʙᴀн** зᴀ ʍноᴦоᴋᴩᴀᴛный ᴄᴨᴀʍ!")
-        return
-    if anti_spam.message_history.get(user_id) and time.time() - anti_spam.message_history[user_id][-1] > 30:
-        anti_spam.reset_warnings(user_id)
+
+    # 2. СИСТЕМА +REP
+    # Используем lower(), чтобы сработало и "+REP", и "+Rep"
+    # if message.content.lower().startswith("+rep"):
+    #     if message.mentions:
+    #         target_user = message.mentions[0]
+    #         BotConfig.deleted_by_bot.add(message.id)
+
+    #     # Проверка: нельзя выдавать репутацию самому себе
+    #     if target_user.id == user_id:
+    #         await safe_reply(
+    #             message,
+    #             "<:forbiddenemoji:1515780232404144279> Вы не можете дать репутацию"
+    #             " самому себе!",
+    #             delete_after=5,
+    #         )
+    #         await safe_delete(message, delay=2)
+    #         return
+
+    #     # Проверка: нельзя выдавать репутацию ботам
+    #     if target_user.bot:
+    #         await safe_reply(
+    #             message,
+    #             "<:forbiddenemoji:1515780232404144279> Нельзя выдавать репутацию"
+    #             " ботам!",
+    #             delete_after=5,
+    #         )
+    #         await safe_delete(message, delay=2)
+    #         return
+
+    #     # Проверка кулдауна
+    #     author_ruler = await manager.get_user_ruler(user_id)
+    #     last_rep_time = author_ruler.get("last_time_reputation", 0)
+    #     cooldown_seconds = 21600  # 6 часов
+    #     time_passed = current_time - last_rep_time
+
+    #     if time_passed < cooldown_seconds:
+    #         seconds_left = int(cooldown_seconds - time_passed)
+    #         hours = seconds_left // 3600
+    #         minutes = (seconds_left % 3600) // 60
+    #         await safe_reply(
+    #             message,
+    #             f"**<:forbiddenemoji:1515780232404144279> {message.author.mention},"
+    #             " вы не можете так часто использовать эту команду!**\n⌛ Осталось:"
+    #             f" **{hours} ч. {minutes} мин.**",
+    #             delete_after=5,
+    #         )
+    #         await safe_delete(message, delay=2)
+    #         return
+
+    #     # Обновление данных получателя
+    #     target_ruler = await manager.get_user_ruler(target_user.id)
+    #     new_reputation = int(target_ruler.get("reputation", 0) + 1)
+
+    #     await manager.update_user_ruler(
+    #         target_user.id,
+    #         target_ruler.get("warnings", 0),
+    #         new_reputation,
+    #         target_ruler.get("last_time_reputation", 0),
+    #     )
+
+    #     # Обновление кулдауна отправителя
+    #     await manager.update_user_ruler(
+    #         user_id,
+    #         author_ruler.get("warnings", 0),
+    #         author_ruler.get("reputation", 0),
+    #         current_time,
+    #     )
+
+    #     await safe_reply(
+    #         message,
+    #         f"{message.author.mention} ʙыдᴀᴧ ᴩᴇᴨуᴛᴀцию {target_user.mention}!"
+    #         " <:reputationemoji:1517480379286556832>",
+    #         delete_after=60,
+    #     )
+    #     return
+
+    # else:
+    #     await safe_reply(
+    #         message,
+    #         "<:forbiddenemoji:1515780232404144279> Укажите пользователя! Пример:"
+    #         " `+rep @User`",
+    #         delete_after=5,
+    #     )
+    #     await safe_delete(message, delay=2)
+    #     return
+
+    # 3. СИСТЕМА LEVEL UP (с защитой от фарма)
+    # Выдаем опыт только если с момента прошлого сообщения прошло больше 60 секунд
+    last_xp_time = XP_COOLDOWNS.get(user_id, 0)
+
+    if current_time - last_xp_time >= 30:
+        XP_COOLDOWNS[user_id] = current_time
+
+        data = await manager.get_user_data(user_id)
+
+        current_xp = int(data.get("xp", 0) + random.randint(15, 25))
+        current_level = data.get("level", 0)
+        current_role = data.get("role", None)
+
+        xp_needed = await manager.get_xp_needed(current_level)
+        leveled_up = False
+
+        while current_xp >= xp_needed:
+            current_xp -= xp_needed
+            current_level += 1
+            xp_needed = await manager.get_xp_needed(current_level)
+            leveled_up = True
+
+        if leveled_up:
+            await safe_send(
+                message.channel,
+                f"<:congrantemoji:1517514349965475954> {message.author.mention}, ʙы"
+                f" доᴄᴛиᴦᴧи **{current_level}** уᴩоʙня!",
+                delete_after=10,
+            )
+
+        # Выдача новой роли и замена старой (при наличии)
+        if current_level in BotConfig.LEVEL_ROLES:
+            target_role_id = BotConfig.LEVEL_ROLES[current_level]
+            new_role = message.guild.get_role(target_role_id)
+
+            if new_role:
+                current_role = new_role.name
+                try:
+                    # Снимаем старые роли за уровни, чтобы не забивать профиль
+                    roles_to_remove = [
+                        message.guild.get_role(r_id)
+                        for lvl, r_id in BotConfig.LEVEL_ROLES.items()
+                        if lvl < current_level and message.guild.get_role(r_id)
+                    ]
+                    roles_to_remove = [
+                        r for r in roles_to_remove if r and r in message.author.roles
+                    ]
+
+                    if roles_to_remove:
+                        await message.author.remove_roles(*roles_to_remove)
+
+                        # Выдаем новую
+                        await message.author.add_roles(new_role)
+                except discord.Forbidden:
+                    print(
+                        "❌ Ошибка: Недостаточно прав для управления ролями"
+                        f" {message.author.name}"
+                    )
+                except discord.HTTPException as e:
+                    print(f"❌ Ошибка HTTP при управлении ролями: {e}")
+
+        await manager.update_user_data(
+            user_id, current_xp, current_level, current_role
+        )
+
+    # Не забудьте пробросить обработку команд, если в боте используются префиксные команды
     await bot.process_commands(message)
 
 @bot.event
-async def on_member_remove(member):
+async def on_member_remove(member: discord.Member):
     if member.bot:
         return
-    current_roles = [role.id for role in member.roles if role.name != "@everyone"]
+
+    quarantine_role_id = BotConfig.ROLES.get("quarantine")
+
+    # Фильтруем роли: исключаем @everyone и роль карантина
+    current_roles = [
+        role.id
+        for role in member.roles
+        if role.name != "@everyone" and role.id != quarantine_role_id
+    ]
+
     try:
         await manager.update_user_roles_ruler(member.id, current_roles)
     except Exception as e:
         print(f"❌ Ошибка сохранения ролей для {member.id}: {e}")
 
-@bot.event
-async def on_member_join(member):
-    if member.bot:
-    # ✅ Проверяем, разрешен ли этот бот
-        trusted_set = getattr(bot, 'trusted_set', trusted_bots)
-        
-        # ✅ Защита от бана самого себя
-        if member.id == bot.user.id:
-            return
-        
-        if member.id not in trusted_set:
-            user_name = member.name
-            
-            # ✅ Отправляем сообщение в welcome канал
-            welcome_channel = await safe_fetch_channel(bot, WELCOME_CHANNEL)
-            if welcome_channel:
-                try:
-                    await safe_send(welcome_channel, f"<:neutralizeemoji:1515694760990347325> ʙᴩᴀжᴇᴄᴋоᴇ уᴄᴛᴩойᴄᴛʙо, {member.mention}, **быᴧо нᴇйᴛᴩᴀᴧизоʙᴀно** ᴧучɯиʍи ᴄᴨᴇц-оᴛᴩядᴀʍи.")
-                except Exception as e:
-                    print(f"❌ Ошибка отправки сообщения в канал: {e}")
-            
-            # ✅ Баним через Member (работает!)
-            try:
-                await member.ban(reason="Неавторизованный бот (Автоматическая нейтрализация)", delete_message_days=1)
-                    
-            except discord.Forbidden:
-                print(f"❌ Нет прав для бана бота {user_name}")
-            except discord.HTTPException as e:
-                print(f"❌ Ошибка при бане бота {user_name}: {e}")
-            except Exception as e:
-                print(f"❌ Неизвестная ошибка при бане бота {user_name}: {e}")
-            
-            return
-    try:
-        roles_to_restore = await manager.get_user_roles_ruler(member.id)
-    except Exception as e:
-        print(f"❌ Ошибка получения ролей: {e}")
-        roles_to_restore = []
-    roles_objects = []
-    for role_id in roles_to_restore:
-        role = member.guild.get_role(role_id)
-        if role is not None and role.name != "@everyone":
-            roles_objects.append(role)    
-    # ✅ Создаем список задач
-    tasks = []
-    # ✅ Восстановление сохраненных ролей
-    if roles_objects:
-        tasks.append(
-            member.add_roles(
-                *roles_objects, 
-                reason="Восстановление ролей после возвращения"
-            )
-        )
-    welcome_channel = await safe_fetch_channel(bot, WELCOME_CHANNEL)
-    if welcome_channel:
-        tasks.append(safe_send(welcome_channel, embed=discord.Embed(title="👋 Welcome!", description=f"Привет, {member.mention}!\nРады видеть тебя на **{member.guild.name}**", color=discord.Color.dark_grey()).add_field(name="📅 Присоединился", value=f"<t:{int(member.joined_at.timestamp())}:R>", inline=True).add_field(name="👤 Участников", value=member.guild.member_count, inline=True).set_thumbnail(url=member.display_avatar.url)))
-    join_roles = []
-    for role_id in [JOIN_ROLE1, JOIN_ROLE2, JOIN_ROLE3]:
-        role = member.guild.get_role(role_id)
-        if role is not None:
-            join_roles.append(role)
-    if join_roles:
-        tasks.append(
-            member.add_roles(
-                *join_roles, 
-                reason="Выдача стандартных ролей при входе"
-            )
-        )
-    if not member.bot:
-        tasks.append(send_dm_welcome(member))
-    if tasks:
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            # ✅ Проверяем результаты
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    print(f"❌ Ошибка в задаче {i}: {result}")
-                    
-        except Exception as e:
-            print(f"❌ Ошибка при выполнении задач: {e}")
-
 # ========== ЛОГИРОВАНИЕ СОБЫТИЙ ==========
 
 @bot.event
 async def on_message_delete(message):
+    # Игнорируем личные сообщения
     if not message.guild:
         return
-    if message.author.bot or not message.content or message.guild.me.id == message.author.id:
+
+    # Пропускаем сообщения, удаленные самим ботом
+    if message.id in BotConfig.deleted_by_bot:
+        BotConfig.deleted_by_bot.discard(message.id)
         return
-    log_channel = await safe_fetch_channel(bot, MOD_LOGS)
+
+    # Игнорируем ботов и пустые сообщения (где нет ни текста, ни вложений)
+    if message.author.bot or (not message.content and not message.attachments):
+        return
+
+    log_channel = await safe_fetch_channel(bot, BotConfig.CHANNELS['mod_logs'])
     if not log_channel:
         return
-    user = await safe_fetch_user(bot, message.author.id)
-    user_mention = user.mention if user else f"<@{message.author.id}>"
+
+    # Данные автора берутся напрямую из message.author без лишних API-запросов
+    author = message.author
+    user_avatar = author.display_avatar.url if author.display_avatar else None
+
     embed = discord.Embed(
-        title="🗑️ The message deleted",
-        description=f"**ᴀʙᴛоᴩ:** {user_mention}\n**ᴋᴀнᴀᴧ:** {message.channel.mention}",
+        title="<:binemoji:1525176536607752202> 𝐃𝐄𝐋𝐄𝐓𝐄𝐃",
+        description=f"`ᴀʙᴛоᴩ:` {author.mention}\n`ᴋᴀнᴀᴧ:` {message.channel.mention}",
         color=discord.Color.red(),
-        timestamp=datetime.now()
+        timestamp=datetime.now(timezone.utc)
     )
-    content = message.content[:1000] + ('...' if len(message.content) > 1000 else '')
-    embed.add_field(
-        name="Содержание", 
-        value=f'```{content}```', 
-        inline=False
-    )
+
+    # Логирование текста сообщения
+    if message.content:
+        # Экранируем тройные кавычки, чтобы не ломать код-блок
+        safe_content = message.content.replace("```", "`\u200b`\u200b`")
+        content = safe_content[:1000] + ('...' if len(safe_content) > 1000 else '')
+        embed.add_field(
+            name="`ᴄодᴇᴩжᴀниᴇ:`", 
+            value=f'```{content}```', 
+            inline=False
+        )
+
+    # Логирование вложений
     if message.attachments:
         attachment_texts = []
-        total_size = 0
-        for i, att in enumerate(message.attachments[:10], 1):
-            is_image = att.content_type and att.content_type.startswith('image/')
-            is_video = att.content_type and att.content_type.startswith('video/')
-            is_audio = att.content_type and att.content_type.startswith('audio/')
-            # Размер файла
-            size_kb = att.size / 1024
-            if size_kb > 1024:
-                size_str = f"{size_kb/1024:.1f} MB"
-            else:
-                size_str = f"{size_kb:.1f} KB"
-            # Иконка
-            if is_image:
+        for att in message.attachments[:10]:
+            content_type = att.content_type or ''
+            
+            # Определение иконки файла
+            if content_type.startswith('image/'):
                 icon = "🖼️"
-            elif is_video:
+            elif content_type.startswith('video/'):
                 icon = "🎬"
-            elif is_audio:
+            elif content_type.startswith('audio/'):
                 icon = "🎵"
             else:
                 icon = "📎"
+
+            # Форматирование размера
+            size_kb = att.size / 1024
+            size_str = f"{size_kb / 1024:.1f} MB" if size_kb > 1024 else f"{size_kb:.1f} KB"
             
             attachment_texts.append(f"{icon} [{att.filename}]({att.url}) ({size_str})")
+
         if len(message.attachments) > 10:
             attachment_texts.append(f"... и еще {len(message.attachments) - 10} файлов")
-        
-        attachments_text = '\n'.join(attachment_texts)
 
+        attachments_text = '\n'.join(attachment_texts)
         if len(attachments_text) > 1024:
             attachments_text = attachments_text[:1021] + "..."
-        
+
         embed.add_field(
             name=f"📎 Вложения ({len(message.attachments)})",
             value=attachments_text,
             inline=False
         )
+
+    # Футер
+    if user_avatar:
+        embed.set_footer(text=author.display_name, icon_url=user_avatar)
+    else:
+        embed.set_footer(text=author.display_name)
+
+    # Отправка лога
     try:
         await safe_send(log_channel, embed=embed)
     except Exception as e:
@@ -2083,57 +3035,101 @@ async def on_message_delete(message):
 
 @bot.event
 async def on_message_edit(before, after):
-    if before.author.bot or before.content == after.content:
+    # Игнорируем личные сообщения и сообщения ботов
+    if not before.guild or before.author.bot:
         return
-    log_channel = await safe_fetch_channel(bot, MOD_LOGS)
+
+    # 1. Если текст и вложения не изменились (например, подгрузился превью ссылки)
+    if (
+        before.content == after.content
+        and before.attachments == after.attachments
+    ):
+        return
+
+    # 2. Проверка на незначительные правки текста
+    if before.content and after.content:
+        # Вычисляем процент схожести (от 0.0 до 1.0)
+        similarity = difflib.SequenceMatcher(
+            None, before.content, after.content
+        ).ratio()
+
+        # Порог схожести: 0.85 (85%). Если изменения меньше 15% — игнорируем.
+        # Если изменилось всего 1-2 символа в коротком сообщении, тоже пропускаем:
+        char_difference = abs(len(before.content) - len(after.content))
+
+        if similarity >= 0.75 and char_difference <= 3:
+            return
+
+    log_channel = await safe_fetch_channel(
+        bot, BotConfig.CHANNELS.get("mod_logs")
+    )
     if not log_channel:
         return
-    user = await safe_fetch_user(bot, before.author.id)
-    user_mention = user.mention if user else f"<@{before.author.id}>"
-    if before.guild:
-        channel_name = before.channel.mention
-    else:
-        channel_name = "Личные сообщения"
+
+    # Берём данные о пользователе
+    author = before.author
+    user_avatar = author.display_avatar.url if author.display_avatar else None
+
+    # Формируем базовый Embed
     embed = discord.Embed(
-        title="✏️ The message redacted",
-        description=f"**ᴀʙᴛоᴩ:** {user_mention}\n**ᴋᴀнᴀᴧ:** {channel_name}",
+        title="<:pencilemoji:1525177241749950464> 𝐑𝐄𝐃𝐀𝐂𝐓𝐄𝐃",
+        description=(
+            f"`ᴀʙᴛоᴩ:` {author.mention}\n`ᴋᴀнᴀᴧ:`"
+            f" {before.channel.mention}\n[Перейти к сообщению]({after.jump_url})"
+        ),
         color=discord.Color.orange(),
-        timestamp=datetime.now()
+        timestamp=datetime.now(timezone.utc),
     )
-    jump_url = before.jump_url if hasattr(before, 'jump_url') else None
-    if jump_url:
-        embed.description += f"\n[Перейти к сообщению]({jump_url})"
-    old_content = before.content[:400] + ('...' if len(before.content) > 400 else '') if before.content else "*Пусто*"
-    embed.add_field(
-        name="Было", 
-        value=f"```{old_content}```", 
-        inline=False
-    )
-    new_content = after.content[:400] + ('...' if len(after.content) > 400 else '') if after.content else "*Пусто*"
-    embed.add_field(
-        name="Стало", 
-        value=f"```{new_content}```", 
-        inline=False
-    )
-    if before.attachments or after.attachments:
-        before_count = len(before.attachments)
-        after_count = len(after.attachments)
-        
-        if before_count != after_count:
+
+    # Функция для безопасного экранирования бэктиков в коде
+    def format_content(content):
+        if not content:
+            return "*Пусто*"
+        safe_text = content.replace("```", "`\u200b`\u200b`")
+        return safe_text[:400] + ("..." if len(safe_text) > 400 else "")
+
+    # Добавляем текстовые поля, только если текст изменился
+    if before.content != after.content:
+        embed.add_field(
+            name="`быᴧо:`",
+            value=f"```{format_content(before.content)}```",
+            inline=False,
+        )
+        embed.add_field(
+            name="`ᴄᴛᴀᴧо:`",
+            value=f"```{format_content(after.content)}```",
+            inline=False,
+        )
+
+    # Логика проверки изменений во вложениях
+    before_count = len(before.attachments)
+    after_count = len(after.attachments)
+
+    if before_count != after_count:
+        embed.add_field(
+            name="📎 Вложения изменены",
+            value=(
+                f"`быᴧо:` {before_count} файлов\n`ᴄᴛᴀᴧо:` {after_count} файлов"
+            ),
+            inline=False,
+        )
+    elif before_count > 0:
+        before_names = {att.filename for att in before.attachments}
+        after_names = {att.filename for att in after.attachments}
+        if before_names != after_names:
             embed.add_field(
                 name="📎 Вложения изменены",
-                value=f"**Было:** {before_count} файлов\n**Стало:** {after_count} файлов",
-                inline=False
+                value="**Имена файлов изменились**",
+                inline=False,
             )
-        elif before.attachments and after.attachments:
-            before_names = {att.filename for att in before.attachments}
-            after_names = {att.filename for att in after.attachments}
-            if before_names != after_names:
-                embed.add_field(
-                    name="📎 Вложения изменены",
-                    value="**Имена файлов изменились**",
-                    inline=False
-                )
+
+    # Установка футера
+    if user_avatar:
+        embed.set_footer(text=author.display_name, icon_url=user_avatar)
+    else:
+        embed.set_footer(text=author.display_name)
+
+    # Отправка лога
     try:
         await safe_send(log_channel, embed=embed)
     except Exception as e:
@@ -2141,94 +3137,248 @@ async def on_message_edit(before, after):
 
 # ========== ОБРАБОТКА ОШИБОК ==========
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    # 1. Извлекаем исходную ошибку, если она обернута во внутренний класс библиотеки
+    if isinstance(error, app_commands.CommandInvokeError):
+        error = error.original
+
+    # 2. Игнорируем ненайденные команды (обычно это временная рассинхронизация Discord)
+    if isinstance(error, app_commands.errors.CommandNotFound):
         return
-    error_messages = {
-        commands.MissingPermissions: "<:forbbiden2emoji:1517479332866429008> У вас недостаточно прав для выполнения этой команды!",
-        commands.MissingRequiredArgument: f"<:forbbiden2emoji:1517479332866429008> Не хватает аргументов! Используйте `!help {ctx.command.name}`",
-        commands.BadArgument: "<:forbbiden2emoji:1517479332866429008> Неверный аргумент! Укажите существующего пользователя.",
-        commands.NotOwner: "<:forbbiden2emoji:1517479332866429008> Эта команда доступна только владельцу бота!",
-        commands.CommandOnCooldown: f"⏰ Подождите {error.retry_after:.1f} секунд перед повторным использованием!",
-        commands.BotMissingPermissions: f"<:forbbiden2emoji:1517479332866429008> У бота недостаточно прав! Нужны: {', '.join(error.missing_permissions)}",
-        commands.MaxConcurrencyReached: "<:forbbiden2emoji:1517479332866429008> Команда уже выполняется! Подождите.",
-        commands.MemberNotFound: "<:forbbiden2emoji:1517479332866429008> Участник не найден на сервере!",
-        commands.UserNotFound: "<:forbbiden2emoji:1517479332866429008> Пользователь не найден!",
-        commands.ChannelNotFound: "<:forbbiden2emoji:1517479332866429008> Канал не найден!",
-        commands.RoleNotFound: "<:forbbiden2emoji:1517479332866429008> Роль не найдена!",
-        commands.NoPrivateMessage: "<:forbbiden2emoji:1517479332866429008> Эта команда недоступна в личных сообщениях!",
-        commands.PrivateMessageOnly: "<:forbbiden2emoji:1517479332866429008> Эта команда доступна только в личных сообщениях!",
-        commands.DisabledCommand: "<:forbbiden2emoji:1517479332866429008> Эта команда отключена!",
-        commands.CheckFailure: "<:forbbiden2emoji:1517479332866429008> У вас нет доступа к этой команде!",
-    }
-    # ✅ Проверяем известные ошибки
-    for error_type, message in error_messages.items():
-        if isinstance(error, error_type):
-            await safe_send(ctx, message)
-            return
-    # ✅ Обработка ошибок Discord
-    if isinstance(error, discord.Forbidden):
-        await safe_send(ctx, "<:forbbiden2emoji:1517479332866429008> У бота нет прав для выполнения этого действия!")
+
+    # 3. Обработка ошибок прав доступа и проверок
+    if isinstance(error, app_commands.errors.CheckFailure):
+        await safe_send(interaction, 
+            "<:forbiddenemoji:1515780232404144279> у ʙᴀᴄ нᴇᴛ доᴄᴛуᴨᴀ ᴋ ϶ᴛой ᴋоʍᴀндᴇ!",
+            ephemeral=True
+        )
         return
+
+    if isinstance(error, app_commands.errors.MissingAnyRole):
+        roles = [f"<@&{role_id}>" for role_id in error.missing_roles]
+        await safe_send(interaction, 
+            f"<:forbiddenemoji:1515780232404144279> у ʙᴀᴄ нᴇᴛ нᴇобходиʍых ᴩоᴧᴇй!\n"
+            f"Требуются: {', '.join(roles)}",
+            ephemeral=True
+        )
+        return
+
+    if isinstance(error, app_commands.errors.MissingRole):
+        await safe_send(interaction, 
+            f"<:forbiddenemoji:1515780232404144279> у ʙᴀᴄ нᴇᴛ ᴩоᴧи <@&{error.missing_role}>!",
+            ephemeral=True
+        )
+        return
+
+    if isinstance(error, app_commands.errors.CommandOnCooldown):
+        await safe_send(interaction, 
+            f"⏰ Подождите {error.retry_after:.1f} ᴄᴇᴋунд ᴨᴇᴩᴇд ᴨоʙᴛоᴩныʍ иᴄᴨоᴧьзоʙᴀниᴇʍ!",
+            ephemeral=True
+        )
+        return
+
+    # Вспомогательная функция для красивого форматирования названий прав
+    def format_permissions(permissions):
+        return ", ".join(f"`{perm.replace('_', ' ').title()}`" for perm in permissions)
+
+    if isinstance(error, app_commands.errors.BotMissingPermissions):
+        await safe_send(interaction, 
+            f"<:forbiddenemoji:1515780232404144279> у боᴛᴀ нᴇдоᴄᴛᴀᴛочно ᴨᴩᴀʙ!\n"
+            f"Нужны: {format_permissions(error.missing_permissions)}",
+            ephemeral=True
+        )
+        return
+
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await safe_send(interaction, 
+            f"<:forbiddenemoji:1515780232404144279> у ʙᴀᴄ нᴇдоᴄᴛᴀᴛочно ᴨᴩᴀʙ!\n"
+            f"Нужны: {format_permissions(error.missing_permissions)}",
+            ephemeral=True
+        )
+        return
+
+    if isinstance(error, app_commands.errors.TransformerError):
+        await safe_send(interaction, 
+            f"<:forbiddenemoji:1515780232404144279> нᴇʙᴇᴩный ɸоᴩʍᴀᴛ ᴀᴩᴦуʍᴇнᴛᴀ: `{error.value}`",
+            ephemeral=True
+        )
+        return
+
+    # 4. Обработка ошибок сети и структуры Discord API
     if isinstance(error, discord.NotFound):
-        await safe_send(ctx, "<:forbbiden2emoji:1517479332866429008> Ресурс не найден!")
+        await safe_send(interaction, 
+            "<:forbiddenemoji:1515780232404144279> учᴀᴄᴛниᴋ иᴧи ᴩᴇᴄуᴩᴄ нᴇ нᴀйдᴇны!",
+            ephemeral=True
+        )
         return
+
+    if isinstance(error, discord.Forbidden):
+        await safe_send(interaction, 
+            "<:forbiddenemoji:1515780232404144279> у боᴛᴀ нᴇᴛ ᴨᴩᴀʙ дᴧя ʙыᴨоᴧнᴇния ϶ᴛоᴦо дᴇйᴄᴛʙия!",
+            ephemeral=True
+        )
+        return
+
     if isinstance(error, discord.HTTPException):
         if error.status == 429:
-            await safe_send(ctx, "⏰ Слишком много запросов! Подождите немного.")
-            return
+            await safe_send(interaction, 
+                "⏰ ᴄᴧиɯᴋоʍ ʍноᴦо зᴀᴨᴩоᴄоʙ! ᴨодождиᴛᴇ нᴇʍноᴦо.",
+                ephemeral=True
+            )
         else:
-            await safe_send(ctx, f"<:forbbiden2emoji:1517479332866429008> Ошибка соединения: {error.status}")
-            return
-    # ✅ Неизвестная ошибка - логируем в консоль и сообщаем
-    print(f"⚠️ Неизвестная ошибка: {error}")
-    print(f"📚 Тип ошибки: {type(error).__name__}")
+            await safe_send(interaction, 
+                f"<:forbiddenemoji:1515780232404144279> оɯибᴋᴀ ᴄоᴇдинᴇния: {error.status}",
+                ephemeral=True
+            )
+        return
+
+    # ==================== ОБРАБОТКА НЕИЗВЕСТНОЙ ОШИБКИ ====================
+    cmd_name = interaction.command.name if interaction.command else "Неизвестно"
     
-    # ✅ Отправляем в лог-канал (если есть)
-    log_channel = await safe_fetch_channel(bot, MOD_LOGS_COMMANDS)
+    # Выводим в локальную консоль подробности с трассировкой
+    print(f"⚠️ Неизвестная ошибка в slash-команде '{cmd_name}':")
+    traceback.print_exception(type(error), error, error.__traceback__)
+
+    # Отправляем лог-запись в специальный канал
+    log_channel = await safe_fetch_channel(bot, BotConfig.CHANNELS['mod_logs_commands'])
     if log_channel:
         try:
+            error_details = str(error)[:1000]
+            
             embed = discord.Embed(
-                title="❌ Ошибка команды",
-                description=f"**Команда:** `{ctx.command.name}`\n"
-                            f"**Пользователь:** {ctx.author.mention}\n"
-                            f"**Канал:** {ctx.channel.mention}\n"
-                            f"**Ошибка:** {type(error).__name__}\n"
-                            f"**Детали:** {error}",
+                title="❌ Ошибка slash-команды",
+                description=(
+                    f"**Команда:** `{cmd_name}`\n"
+                    f"**Пользователь:** {interaction.user.mention} (ID: {interaction.user.id})\n"
+                    f"**Канал:** {interaction.channel.mention if interaction.channel else 'Неизвестно'}\n"
+                    f"**Тип ошибки:** `{type(error).__name__}`"
+                ),
                 color=discord.Color.red(),
-                timestamp=datetime.now()
+                timestamp=datetime.now(timezone.utc)
             )
-            embed.set_footer(text=f"ID: {ctx.author.id}")
-            await log_channel.send(embed=embed)
+            embed.add_field(name="Детали ошибки", value=f"```py\n{error_details}```", inline=False)
+            embed.set_footer(text=f"ID пользователя: {interaction.user.id}")
+            
+            await safe_send(log_channel, embed=embed)
+        except Exception as log_err:
+            print(f"❌ Ошибка отправки лога в канал: {log_err}")
+
+    # Мягкое уведомление пользователя
+    try:
+        await safe_send(interaction, 
+            "⚠️ Произошла неизвестная ошибка. Разработчик уже уведомлён.",
+            ephemeral=True
+        )
+    except Exception:
+        pass
+
+# ========== ЗАПУСК КОГОВ БОТА ==========
+
+class MyBot(commands.Bot):
+    def __init__(self):
+        # Включаем все необходимые интенты
+        intents = discord.Intents.all()
+        super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self):
+        # 1. Загружаем наш Ког защиты сервера
+        # Бот автоматически найдет внутри него все команды с @app_commands.command
+        try:
+            await self.add_cog(ServerProtection(bot))
+            print("✅ ServerProtection загружен")
         except Exception as e:
-            print(f"❌ Ошибка отправки лога: {e}")
-    
-    # ✅ Сообщение пользователю
-    await safe_send(ctx, "⚠️ Произошла неизвестная ошибка. Разработчик уже уведомлён.")
+            print(f"❌ Ошибка загрузки ServerProtection: {e}")
+        try:
+            await self.add_cog(ModerationCommands(bot))
+            print("✅ ModerationCommands загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ModerationCommands: {e}")
+        try:
+            await self.add_cog(InfoCommands(bot))
+            print("✅ InfoCommands загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки InfoCommands: {e}")
+        # try:
+        #     await self.add_cog(ProfanityFilter(bot))
+        #     print("✅ ProfanityFilter загружен")
+        # except Exception as e:
+        #     print(f"❌ Ошибка загрузки ProfanityFilter: {e}")
+        try:
+            await self.add_cog(AntiSpam(bot))
+            print("✅ AntiSpam загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки AntiSpam: {e}")
+        try:
+            await self.add_cog(RolePermissionDetector(bot))
+            print("✅ RolePermissionDetector загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки RolePermissionDetector: {e}")
+        try:
+            await self.add_cog(AntiWebhook(bot))
+            print("✅ AntiWebhook загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки AntiWebhook: {e}")
+        try:
+            await self.add_cog(TempVoice(bot))
+            print("✅ TempVoice загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки TempVoice: {e}")
+        try:
+            await self.add_cog(VoiceSpamDetector(bot))
+            print("✅ VoiceSpamDetector загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки VoiceSpamDetector: {e}")
+        try:
+            await self.add_cog(ThreadModeration(bot))
+            print("✅ ThreadModeration загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ThreadModeration: {e}")
+        try:
+            await self.add_cog(ReactionAntiSpam(bot))
+            print("✅ ReactionAntiSpam загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ReactionAntiSpam: {e}")
+        try:
+            await self.add_cog(ServerStatsCog(bot))
+            print("✅ ServerStatsCog загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ServerStatsCog: {e}")
+
+        # 2. Мгновенная синхронизация для разработки
+        # Слэш-команды, синхронизированные на конкретный сервер, появляются СРАЗУ (за 1 секунду)
+        if BotConfig.GUILD_ID:
+            guild = discord.Object(id=BotConfig.GUILD_ID)
+            
+            # Копируем наши глобальные команды из Когов в дерево этого сервера
+            self.tree.copy_global_to(guild=guild)
+            
+            # Синхронизируем дерево конкретного сервера
+            synced = await self.tree.sync(guild=guild)
+            print(f"⚙️ [Локальная синхронизация] Успешно загружено {len(synced)} команд на сервер {guild.id}.")
+        else:
+            # Глобальная синхронизация (для продакшена, команды обновляются до 1 часа)
+            synced = await self.tree.sync()
+            print(f"⚙️ [Глобальная синхронизация] Успешно загружено {len(synced)} глобальных команд.")
+
+commands_func = ModerationFunc(bot)
+bot = MyBot()
 
 # ========== ЗАПУСК БОТА ==========
 
 @bot.event
 async def on_ready():
-    try:
-        await bot.tree.sync(guild=None) 
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
     print(f"✅ Бот {bot.user} запущен!")
-    print(f"📊 На серверах: {len(bot.guilds)}")
-    print(f"🔧 Команд: {len(bot.commands)}")
     await bot.change_presence(
         activity=discord.CustomActivity(
             name="Слежу за порядком 🛡️",
         )
     )
-    await bot.add_cog(TempVoice(bot))
 
 # Запуск бота
 if __name__ == "__main__":
     TOKEN = os.getenv('BOT_TOKEN_RULER')
-    manager = DB_Manager('/app/database/fg_db.db')
+    manager = DB_Manager(BotConfig.DB_PATH)
     if TOKEN:
         bot.run(TOKEN)
     else:
