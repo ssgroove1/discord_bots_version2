@@ -2964,9 +2964,14 @@ async def on_message_delete(message):
     if message.author.bot or (not message.content and not message.attachments):
         return
 
-    log_channel = await safe_fetch_channel(bot, BotConfig.CHANNELS['mod_logs'])
+    # ГЛОБАЛЬНЫЙ ПОИСК КАНАЛА (для межсерверной отправки)
+    log_channel_id = BotConfig.CHANNELS.get('mod_logs')
+    log_channel = bot.get_channel(log_channel_id)
     if not log_channel:
-        return
+        try:
+            log_channel = await bot.fetch_channel(log_channel_id)
+        except Exception:
+            return
 
     # Данные автора берутся напрямую из message.author без лишних API-запросов
     author = message.author
@@ -3037,6 +3042,7 @@ async def on_message_delete(message):
     except Exception as e:
         print(f"Ошибка при отправке лога удаления: {e}")
 
+
 @bot.event
 async def on_message_edit(before, after):
     # Игнорируем личные сообщения и сообщения ботов
@@ -3064,11 +3070,14 @@ async def on_message_edit(before, after):
         if similarity >= 0.75 and char_difference <= 3:
             return
 
-    log_channel = await safe_fetch_channel(
-        bot, BotConfig.CHANNELS.get("mod_logs")
-    )
+    # ГЛОБАЛЬНЫЙ ПОИСК КАНАЛА (для межсерверной отправки)
+    log_channel_id = BotConfig.CHANNELS.get('mod_logs')
+    log_channel = bot.get_channel(log_channel_id)
     if not log_channel:
-        return
+        try:
+            log_channel = await bot.fetch_channel(log_channel_id)
+        except Exception:
+            return
 
     # Берём данные о пользователе
     author = before.author
@@ -3098,12 +3107,12 @@ async def on_message_edit(before, after):
             name="`быᴧо:`",
             value=f"```{format_content(before.content)}```",
             inline=False,
-        )
+            )
         embed.add_field(
             name="`ᴄᴛᴀᴧо:`",
             value=f"```{format_content(after.content)}```",
             inline=False,
-        )
+            )
 
     # Логика проверки изменений во вложениях
     before_count = len(before.attachments)
@@ -3116,7 +3125,7 @@ async def on_message_edit(before, after):
                 f"`быᴧо:` {before_count} файлов\n`ᴄᴛᴀᴧо:` {after_count} файлов"
             ),
             inline=False,
-        )
+            )
     elif before_count > 0:
         before_names = {att.filename for att in before.attachments}
         after_names = {att.filename for att in after.attachments}
@@ -3125,7 +3134,7 @@ async def on_message_edit(before, after):
                 name="📎 Вложения изменены",
                 value="**Имена файлов изменились**",
                 inline=False,
-            )
+                )
 
     # Установка футера
     if user_avatar:

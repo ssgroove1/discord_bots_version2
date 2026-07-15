@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).parent
 class ModerationFunc():
     def __init__(self, bot):
         self.bot = bot
-        self.manager = DB_Manager('fg_db.db')
+        self.manager = DB_Manager(BotConfig.DB_PATH)
 
     # =================================================== BAN FUNC ===============================================
     async def ban_func(
