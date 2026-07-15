@@ -80,13 +80,13 @@ def run_bot_manager(bot):
         print(f"🚀 [{bot_name}] Запуск процесса...")
         try:
             process = subprocess.Popen(
-                [python_executable, str(bot_file)],
+                [python_executable, "-u", str(bot_file)],  # <- Добавили "-u" для моментального сброса логов
                 cwd=str(bot["path"]),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1
+                bufsize=1  # Построчный буфер на стороне менеджера
             )
             active_processes[bot_name] = process
             print(f"✅ [{bot_name}] Успешно запущен (PID: {process.pid})")
