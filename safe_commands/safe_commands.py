@@ -270,9 +270,38 @@ class SafeCommands():
             print("Ошибка: передан не Interaction и не Message")
             return None
 
+    @staticmethod
+    async def safe_fetch_user(bot, user_id: int):
+        """
+        Безопасное получение объекта пользователя.
+        Сначала ищет в кэше, если нет — делает сетевой запрос.
+        """
+        # 1. Ждем, пока бот авторизуется, чтобы избежать ошибок инициализации клиента
+        if not bot.is_ready():
+            await bot.wait_until_ready()
 
-    async def safe_fetch_channel(self, bot, channel_id, max_retries=3):
-        # 1. Пытаемся получить канал из кэша БОТА (используем bot, а не self!)
+        # 2. Пытаемся взять из быстрой памяти (кэша)
+        user = bot.get_user(user_id)
+        if user is not None:
+            return user
+
+        # 3. Если в кэше нет, принудительно запрашиваем у серверов Discord
+        try:
+            return await bot.fetch_user(user_id)
+        except discord.NotFound:
+            print(f"❌ Пользователь {user_id} действительно не существует в Discord.")
+            return None
+        except Exception as e:
+            print(f"❌ Не удалось получить пользователя {user_id}: {e}")
+            return None
+
+    @staticmethod
+    async def safe_fetch_channel(bot, channel_id: int, max_retries: int = 3):
+        """
+        Безопасное получение текстового/голосового канала.
+        Игнорирует запросы до готовности бота, обрабатывает Rate Limit (429) и ошибки прав.
+        """
+        # 1. Пытаемся получить канал из кэша бота
         channel = bot.get_channel(channel_id)
         if channel is not None:
             return channel
@@ -282,42 +311,27 @@ class SafeCommands():
             print(f"⚠️ Попытка получить канал {channel_id} до авторизации бота.")
             return None
 
-        # 3. Делаем безопасный запрос к API Discord
+        # 3. Делаем безопасный запрос к API Discord с поддержкой повторных попыток
         for attempt in range(max_retries):
             try:
                 return await bot.fetch_channel(channel_id)
             except discord.HTTPException as e:
-                if e.status == 429:  # Rate Limit
+                if e.status == 429:  # Rate Limit (слишком много запросов от хостинга)
                     retry_after = float(e.response.headers.get('Retry-After', 1))
+                    print(f"⏳ Rate limit на хостинге при получении канала {channel_id}. Ожидание {retry_after} сек...")
                     await asyncio.sleep(retry_after * (attempt + 1))
                     continue
                 else:
-                    print(f"HTTP ошибка при получении канала {channel_id}: {e}")
+                    print(f"❌ HTTP ошибка при получении канала {channel_id}: {e}")
                     return None
             except discord.Forbidden:
-                print(f"Нет доступа к каналу {channel_id}")
+                print(f"❌ Нет доступа (права/Permissions) к каналу {channel_id}")
                 return None
             except discord.NotFound:
-                print(f"Канал {channel_id} не найден")
+                print(f"❌ Канал {channel_id} не найден на сервере")
                 return None
             except Exception as e:
-                print(f"Неизвестная ошибка при получении канала {channel_id}: {e}")
+                print(f"❌ Неизвестная ошибка при получении канала {channel_id}: {e}")
                 return None
                 
-        return None
-
-
-    async def safe_fetch_user(self, bot, user_id, max_retries=3):
-        for attempt in range(max_retries):
-            try:
-                return await bot.fetch_user(user_id)
-            except HTTPException as e:
-                if e.status == 429:
-                    retry_after = float(e.response.headers.get('Retry-After', 1))
-                    await asyncio.sleep(retry_after)
-                    continue
-                else:
-                    return None
-            except:
-                return None
         return None

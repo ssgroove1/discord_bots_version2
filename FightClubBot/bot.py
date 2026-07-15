@@ -702,6 +702,21 @@ class ServerProtection(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
+        # 1. Ждем, пока внутренний клиент discord.py полностью авторизуется в сети
+        try:
+            await self.bot.wait_until_ready()
+        except Exception as e:
+            print(f"⚠️ Ошибка при ожидании готовности бота для {member.name}: {e}")
+            return
+
+        # 2. Даем боту короткую паузу (0.5 сек), чтобы Discord успел обновить кэш участников 
+        # и убрать ошибку "Пользователь не найден"
+        await asyncio.sleep(0.5)
+
+        # 3. Дополнительная проверка: готов ли клиент на самом деле?
+        if not self.bot.is_ready():
+            print(f"❌ Пропускаем обработку {member.name}: бот всё ещё не готов к отправке запросов.")
+            return
         # ==================== ЛОГИКА ДЛЯ БОТОВ ====================
         if member.bot:
             if member.id == bot.user.id:
@@ -1602,6 +1617,7 @@ class TempVoice(commands.Cog):
         self.bot = bot
         self.temp_channels = set()
         self.muted_role_id = BotConfig.ROLES.get("muted")
+        self.join5_role_id = BotConfig.WELCOME_ROLES.get("join5")
         
         # Блокировка от гонки запросов при создании
         self._creation_lock = asyncio.Lock()
@@ -1694,6 +1710,14 @@ class TempVoice(commands.Cog):
                             connect=False,
                             speak=False,
                             stream=False
+                        )
+
+                if self.join5_role_id:
+                    join5_role = member.guild.get_role(self.join5_role_id)
+                    if join5_role:
+                        overwrites[join5_role] = discord.PermissionOverwrite(
+                            view_channel=False,
+                            connect=False  # Запрещаем заходить в канал
                         )
 
                 # Создание канала
@@ -2243,8 +2267,8 @@ class ModerationCommands(commands.Cog):
         self.last_purge_date = None
         # Запускаем фоновую задачу для автоматической очистки логов раз в 2 дня
 
-    # async def cog_load(self):
-    #     self.bot.loop.create_task(self._auto_purge_logs_task())
+    async def cog_load(self):
+        self.bot.loop.create_task(self._auto_purge_logs_task())
 
     async def _auto_purge_logs_task(self):
         # 1. Ждём, пока бот полностью подключится к Discord API
@@ -2570,10 +2594,23 @@ class ModerationCommands(commands.Cog):
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def status_of_bot(self, interaction: discord.Interaction):
+        # 1. Сразу сообщаем Discord, что мы приняли команду и думаем (избегаем таймаута в 3 секунды)
+        await interaction.response.defer(ephemeral=True)
+
+        # 2. Проверка разработчика
         if interaction.user.id != BotConfig.DEVELOPER_ID:
-            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> У тебя нет прав для этой команды.", ephemeral=True)
+            await interaction.followup.send(
+                content="<:forbiddenemoji:1515780232404144279> У тебя нет прав для этой команды.", 
+                ephemeral=True
+            )
             return
-        await safe_send(Interaction, f"{interaction.user.mention}, бот ещё жив! <:grantedemoji:1520173483299049623>", delete_after=5)
+
+        # 3. Отправляем ответ (с маленькой буквы 'interaction')
+        # Так как мы использовали defer(), для ответа используем followup.send
+        await interaction.followup.send(
+            content=f"{interaction.user.mention}, бот ещё жив! <:grantedemoji:1520173483299049623>",
+            ephemeral=True # Сделаем ответ видимым только разработчику
+        )
 
     # ========== КОМАНДЫ ПОМОЩИ ==========
 
