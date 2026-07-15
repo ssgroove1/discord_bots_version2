@@ -3444,11 +3444,28 @@ bot = MyBot()
 
 @bot.event
 async def on_ready():
-    print(f"✅ Бот {bot.user} запущен!")
-    await bot.change_presence(
-        activity=discord.CustomActivity(
-            name="Слежу за порядком 🛡️",
-        ))
+    print("=========================================")
+    print(f"Бот успешно запущен как: {bot.user.name} (ID: {bot.user.id})")
+    
+    # 1. Проверяем, какие коги (модули) реально загружены в бота
+    loaded_cogs = list(bot.cogs.keys())
+    print(f"Загруженные коги/модули ({len(loaded_cogs)} шт): {loaded_cogs}")
+    if not loaded_cogs:
+        print("⚠️ ВНИМАНИЕ: Ни один ког/модуль не загружен! Проверьте пути к папке cogs.")
+    
+    print("\nПроверка каналов из config.py:")
+    for channel_name, channel_id in BotConfig.CHANNELS.items():
+        channel = bot.get_channel(channel_id)
+        if channel:
+            print(f"✅ Канал [{channel_name}] (ID: {channel_id}) успешно найден на сервере: '{channel.guild.name}'")
+        else:
+            print(f"❌ Канал [{channel_name}] (ID: {channel_id}) НЕ найден! Бот не сможет отправить туда логи.")
+            
+    # 3. Проверяем статус интентов (Intents)
+    print("\nСтатус Интентов:")
+    print(f"• Message Content (Текст сообщений): {bot.intents.message_content}")
+    print(f"• Members (Участники сервера): {bot.intents.members}")
+    print("=========================================")
 
 # Запуск бота
 if __name__ == "__main__":
