@@ -297,35 +297,36 @@ class SafeCommands():
 
     @staticmethod
     async def safe_fetch_channel(bot, channel_id: int, max_retries: int = 3):
-        """
-        Безопасное получение текстового/голосового канала.
-        Игнорирует запросы до готовности бота, обрабатывает Rate Limit (429) и ошибки прав.
-        """
-        # 1. Пытаемся получить канал из кэша бота
         channel = bot.get_channel(channel_id)
         if channel is not None:
             return channel
 
-        # 2. Если в кэше нет, проверяем готовность бота перед сетевым запросом
-        if not bot.is_ready() and (not hasattr(bot, 'http') or bot.http.token is None):
-            print(f"⚠️ Попытка получить канал {channel_id} до авторизации бота.")
-            return None
+        # 2. КРИТИЧЕСКИЙ ФИКС: Если бот еще не готов или HTTP-клиент не инициализирован, 
+        # мы принудительно ждем полной готовности бота.
+        # Это предотвращает ошибку "Client has not been properly initialised"
+        if not bot.is_ready() or not getattr(bot, '_connection', None) or bot.http.is_closed():
+            try:
+                print(f"⏳ Канал {channel_id} запрошен до готовности бота. Ожидаем авторизации клиента...")
+                await bot.wait_until_ready()
+            except Exception as e:
+                print(f"❌ Ошибка при ожидании готовности бота для канала {channel_id}: {e}")
+                return None
 
-        # 3. Делаем безопасный запрос к API Discord с поддержкой повторных попыток
+        # 3. Делаем безопасный запрос к API Discord с обработкой Rate Limit и ошибок прав
         for attempt in range(max_retries):
             try:
                 return await bot.fetch_channel(channel_id)
             except discord.HTTPException as e:
-                if e.status == 429:  # Rate Limit (слишком много запросов от хостинга)
+                if e.status == 429:  # Rate Limit
                     retry_after = float(e.response.headers.get('Retry-After', 1))
-                    print(f"⏳ Rate limit на хостинге при получении канала {channel_id}. Ожидание {retry_after} сек...")
+                    print(f"⏳ Rate Limit при получении канала {channel_id}. Ожидание {retry_after} сек...")
                     await asyncio.sleep(retry_after * (attempt + 1))
                     continue
                 else:
                     print(f"❌ HTTP ошибка при получении канала {channel_id}: {e}")
                     return None
             except discord.Forbidden:
-                print(f"❌ Нет доступа (права/Permissions) к каналу {channel_id}")
+                print(f"❌ Нет доступа (права) к каналу {channel_id}")
                 return None
             except discord.NotFound:
                 print(f"❌ Канал {channel_id} не найден на сервере")
