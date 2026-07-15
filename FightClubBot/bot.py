@@ -20,6 +20,7 @@ XP_COOLDOWNS = {}
 
 # Настройки бота
 intents = discord.Intents.default()
+intents.messages = True
 intents.message_content = True
 intents.members = True
 intents.moderation = True
@@ -2950,30 +2951,30 @@ async def on_member_remove(member: discord.Member):
 # ========== ЛОГИРОВАНИЕ СОБЫТИЙ ==========
 
 @bot.event
-async def on_message_delete(message):
-    # Игнорируем личные сообщения
-    if not message.guild:
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    # Игнорируем ЛС
+    if not payload.guild_id:
         return
 
-    # Пропускаем сообщения, удаленные самим ботом
-    if message.id in BotConfig.deleted_by_bot:
-        BotConfig.deleted_by_bot.discard(message.id)
+    # Пропускаем, если удалено ботом
+    if payload.message_id in BotConfig.deleted_by_bot:
+        BotConfig.deleted_by_bot.discard(payload.message_id)
         return
 
-    # Игнорируем ботов и пустые сообщения (где нет ни текста, ни вложений)
+    # Если сообщения не было в кэше, мы не знаем его автора и текст
+    message = payload.cached_message
+    if not message:
+        # Опционально: можно отправить лог "Сообщение удалено (не найдено в кэше)"
+        return
+
     if message.author.bot or (not message.content and not message.attachments):
         return
 
-    # ГЛОБАЛЬНЫЙ ПОИСК КАНАЛА (для межсерверной отправки)
     log_channel_id = BotConfig.CHANNELS.get('mod_logs')
-    log_channel = bot.get_channel(log_channel_id)
+    log_channel = bot.get_channel(log_channel_id) or await bot.fetch_channel(log_channel_id)
     if not log_channel:
-        try:
-            log_channel = await bot.fetch_channel(log_channel_id)
-        except Exception:
-            return
+        return
 
-    # Данные автора берутся напрямую из message.author без лишних API-запросов
     author = message.author
     user_avatar = author.display_avatar.url if author.display_avatar else None
 
@@ -2984,37 +2985,18 @@ async def on_message_delete(message):
         timestamp=datetime.now(timezone.utc)
     )
 
-    # Логирование текста сообщения
     if message.content:
-        # Экранируем тройные кавычки, чтобы не ломать код-блок
         safe_content = message.content.replace("```", "`\u200b`\u200b`")
         content = safe_content[:1000] + ('...' if len(safe_content) > 1000 else '')
-        embed.add_field(
-            name="`ᴄодᴇᴩжᴀниᴇ:`", 
-            value=f'```{content}```', 
-            inline=False
-        )
+        embed.add_field(name="`ᴄодᴇᴩжᴀниᴇ:`", value=f'```{content}```', inline=False)
 
-    # Логирование вложений
     if message.attachments:
         attachment_texts = []
         for att in message.attachments[:10]:
             content_type = att.content_type or ''
-            
-            # Определение иконки файла
-            if content_type.startswith('image/'):
-                icon = "🖼️"
-            elif content_type.startswith('video/'):
-                icon = "🎬"
-            elif content_type.startswith('audio/'):
-                icon = "🎵"
-            else:
-                icon = "📎"
-
-            # Форматирование размера
+            icon = "🖼️" if content_type.startswith('image/') else "🎬" if content_type.startswith('video/') else "🎵" if content_type.startswith('audio/') else "📎"
             size_kb = att.size / 1024
             size_str = f"{size_kb / 1024:.1f} MB" if size_kb > 1024 else f"{size_kb:.1f} KB"
-            
             attachment_texts.append(f"{icon} [{att.filename}]({att.url}) ({size_str})")
 
         if len(message.attachments) > 10:
@@ -3023,20 +3005,10 @@ async def on_message_delete(message):
         attachments_text = '\n'.join(attachment_texts)
         if len(attachments_text) > 1024:
             attachments_text = attachments_text[:1021] + "..."
+        embed.add_field(name=f"📎 Вложения ({len(message.attachments)})", value=attachments_text, inline=False)
 
-        embed.add_field(
-            name=f"📎 Вложения ({len(message.attachments)})",
-            value=attachments_text,
-            inline=False
-        )
+    embed.set_footer(text=author.display_name, icon_url=user_avatar) if user_avatar else embed.set_footer(text=author.display_name)
 
-    # Футер
-    if user_avatar:
-        embed.set_footer(text=author.display_name, icon_url=user_avatar)
-    else:
-        embed.set_footer(text=author.display_name)
-
-    # Отправка лога
     try:
         await safe_send(log_channel, embed=embed)
     except Exception as e:
@@ -3044,9 +3016,29 @@ async def on_message_delete(message):
 
 
 @bot.event
-async def on_message_edit(before, after):
-    # Игнорируем личные сообщения и сообщения ботов
-    if not before.guild or before.author.bot:
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+    # Игнорируем личные сообщения
+    if not payload.guild_id:
+        return
+
+    # Пытаемся получить старую версию сообщения из кэша бота
+    before = payload.cached_message
+    if not before:
+        # Если сообщения нет в кэше, мы не можем узнать, что именно изменилось
+        return
+
+    # Игнорируем сообщения ботов
+    if before.author.bot:
+        return
+
+    # Получаем обновленное (новое) сообщение из канала
+    try:
+        channel = bot.get_channel(payload.channel_id) or await bot.fetch_channel(payload.channel_id)
+        if not channel:
+            return
+        after = await channel.fetch_message(payload.message_id)
+    except Exception:
+        # Если сообщение не удалось получить (например, удалено или нет доступа)
         return
 
     # 1. Если текст и вложения не изменились (например, подгрузился превью ссылки)
@@ -3063,8 +3055,7 @@ async def on_message_edit(before, after):
             None, before.content, after.content
         ).ratio()
 
-        # Порог схожести: 0.85 (85%). Если изменения меньше 15% — игнорируем.
-        # Если изменилось всего 1-2 символа в коротком сообщении, тоже пропускаем:
+        # Порог схожести: 0.75 (75%). Если изменения незначительные — игнорируем.
         char_difference = abs(len(before.content) - len(after.content))
 
         if similarity >= 0.75 and char_difference <= 3:
@@ -3083,7 +3074,7 @@ async def on_message_edit(before, after):
     author = before.author
     user_avatar = author.display_avatar.url if author.display_avatar else None
 
-    # Формируем базовый Embed
+    # Формируем базовый Embed (оригинальное оформление сохранено)
     embed = discord.Embed(
         title="<:pencilemoji:1525177241749950464> 𝐑𝐄𝐃𝐀𝐂𝐓𝐄𝐃",
         description=(
@@ -3107,12 +3098,12 @@ async def on_message_edit(before, after):
             name="`быᴧо:`",
             value=f"```{format_content(before.content)}```",
             inline=False,
-            )
+        )
         embed.add_field(
             name="`ᴄᴛᴀᴧо:`",
             value=f"```{format_content(after.content)}```",
             inline=False,
-            )
+        )
 
     # Логика проверки изменений во вложениях
     before_count = len(before.attachments)
@@ -3125,7 +3116,7 @@ async def on_message_edit(before, after):
                 f"`быᴧо:` {before_count} файлов\n`ᴄᴛᴀᴧо:` {after_count} файлов"
             ),
             inline=False,
-            )
+        )
     elif before_count > 0:
         before_names = {att.filename for att in before.attachments}
         after_names = {att.filename for att in after.attachments}
@@ -3134,7 +3125,7 @@ async def on_message_edit(before, after):
                 name="📎 Вложения изменены",
                 value="**Имена файлов изменились**",
                 inline=False,
-                )
+            )
 
     # Установка футера
     if user_avatar:
