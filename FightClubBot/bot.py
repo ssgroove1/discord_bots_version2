@@ -2192,6 +2192,10 @@ class VerificationView(discord.ui.View):
         self.add_item(button)
 
     async def verify_callback(self, interaction: discord.Interaction):
+        role_to_remove = interaction.guild.get_role(BotConfig.WELCOME_ROLES.get("join5"))
+        if role_to_remove:
+            await interaction.user.remove_roles(role_to_remove, reason="Верификация через кнопку")
+
         role = interaction.guild.get_role(self.role_id)
         if not role:
             await safe_send(interaction, "Ошибка: Роль верификации не найдена на сервере.", ephemeral=True)
