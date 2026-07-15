@@ -3297,66 +3297,66 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         # 1. Загружаем наш Ког защиты сервера
         # Бот автоматически найдет внутри него все команды с @app_commands.command
+        try:
+            await self.add_cog(ServerProtection(bot))
+            print("✅ ServerProtection загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ServerProtection: {e}")
+        try:
+            await self.add_cog(ModerationCommands(bot))
+            print("✅ ModerationCommands загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ModerationCommands: {e}")
+        try:
+            await self.add_cog(InfoCommands(bot))
+            print("✅ InfoCommands загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки InfoCommands: {e}")
         # try:
-        #     await self.add_cog(ServerProtection(bot))
-        #     print("✅ ServerProtection загружен")
+        #     await self.add_cog(ProfanityFilter(bot))
+        #     print("✅ ProfanityFilter загружен")
         # except Exception as e:
-        #     print(f"❌ Ошибка загрузки ServerProtection: {e}")
-        # try:
-        #     await self.add_cog(ModerationCommands(bot))
-        #     print("✅ ModerationCommands загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки ModerationCommands: {e}")
-        # try:
-        #     await self.add_cog(InfoCommands(bot))
-        #     print("✅ InfoCommands загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки InfoCommands: {e}")
-        # # try:
-        # #     await self.add_cog(ProfanityFilter(bot))
-        # #     print("✅ ProfanityFilter загружен")
-        # # except Exception as e:
-        # #     print(f"❌ Ошибка загрузки ProfanityFilter: {e}")
-        # try:
-        #     await self.add_cog(AntiSpam(bot))
-        #     print("✅ AntiSpam загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки AntiSpam: {e}")
-        # try:
-        #     await self.add_cog(RolePermissionDetector(bot))
-        #     print("✅ RolePermissionDetector загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки RolePermissionDetector: {e}")
-        # try:
-        #     await self.add_cog(AntiWebhook(bot))
-        #     print("✅ AntiWebhook загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки AntiWebhook: {e}")
-        # try:
-        #     await self.add_cog(TempVoice(bot))
-        #     print("✅ TempVoice загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки TempVoice: {e}")
-        # try:
-        #     await self.add_cog(VoiceSpamDetector(bot))
-        #     print("✅ VoiceSpamDetector загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки VoiceSpamDetector: {e}")
-        # try:
-        #     await self.add_cog(ThreadModeration(bot))
-        #     print("✅ ThreadModeration загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки ThreadModeration: {e}")
-        # try:
-        #     await self.add_cog(ReactionAntiSpam(bot))
-        #     print("✅ ReactionAntiSpam загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки ReactionAntiSpam: {e}")
-        # try:
-        #     await self.add_cog(ServerStatsCog(bot))
-        #     print("✅ ServerStatsCog загружен")
-        # except Exception as e:
-        #     print(f"❌ Ошибка загрузки ServerStatsCog: {e}")
+        #     print(f"❌ Ошибка загрузки ProfanityFilter: {e}")
+        try:
+            await self.add_cog(AntiSpam(bot))
+            print("✅ AntiSpam загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки AntiSpam: {e}")
+        try:
+            await self.add_cog(RolePermissionDetector(bot))
+            print("✅ RolePermissionDetector загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки RolePermissionDetector: {e}")
+        try:
+            await self.add_cog(AntiWebhook(bot))
+            print("✅ AntiWebhook загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки AntiWebhook: {e}")
+        try:
+            await self.add_cog(TempVoice(bot))
+            print("✅ TempVoice загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки TempVoice: {e}")
+        try:
+            await self.add_cog(VoiceSpamDetector(bot))
+            print("✅ VoiceSpamDetector загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки VoiceSpamDetector: {e}")
+        try:
+            await self.add_cog(ThreadModeration(bot))
+            print("✅ ThreadModeration загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ThreadModeration: {e}")
+        try:
+            await self.add_cog(ReactionAntiSpam(bot))
+            print("✅ ReactionAntiSpam загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ReactionAntiSpam: {e}")
+        try:
+            await self.add_cog(ServerStatsCog(bot))
+            print("✅ ServerStatsCog загружен")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки ServerStatsCog: {e}")
 
         # 2. Мгновенная синхронизация для разработки
         # Слэш-команды, синхронизированные на конкретный сервер, появляются СРАЗУ (за 1 секунду)
@@ -3385,9 +3385,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.CustomActivity(
             name="Слежу за порядком 🛡️",
-        )
-    )
-    bot.tree.sync()
+        ))
 
 # Запуск бота
 if __name__ == "__main__":
