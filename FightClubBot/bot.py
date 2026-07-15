@@ -24,7 +24,7 @@ intents.messages = True
 intents.message_content = True
 intents.members = True
 intents.moderation = True
-bot = commands.Bot(command_prefix=BotConfig.COMMAND_PREFIX, intents=intents)
+bot = commands.Bot(command_prefix=BotConfig.COMMAND_PREFIX, intents=intents, max_messages=10000)
 
 init_safe(bot) # safe_send, safe_reply...
 
@@ -2555,13 +2555,16 @@ class ModerationCommands(commands.Cog):
     @app_commands.command(name='sync', description='Синхронизировать команды.')
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    async def sync(self, interaction: discord.Interaction):
-        if interaction.user.id != BotConfig.DEVELOPER_ID:
-            await safe_send(interaction, "<:forbiddenemoji:1515780232404144279> У тебя нет прав для этой команды.", ephemeral=True)
-            return
+    async def clearslash(self, interaction: discord.Interaction):
+        # 1. Очищаем локальные команды на этом сервере
+        bot.tree.clear_commands(guild=interaction.guild)
+        await bot.tree.sync(guild=interaction.guild)
+        
+        # 2. Очищаем глобальные команды бота
         bot.tree.clear_commands(guild=None)
-        await bot.tree.sync(guild=None)
-        await safe_send(interaction, "<:grantedemoji:1520173483299049623> Команды синхронизированы для текущего сервера.", ephemeral=False)
+        await bot.tree.sync()
+        
+        await safe_send(interaction, "🧹 Все слэш-команды (глобальные и локальные) успешно удалены из Discord! Подождите пару минут, пока Discord обновит интерфейс.")
 
     @app_commands.command(name='status', description='Статус бота.')
     @app_commands.guild_only()
@@ -2956,23 +2959,48 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     if not payload.guild_id:
         return
 
-    # Пропускаем, если удалено ботом
+    # Пропускаем, если удалено самим ботом
     if payload.message_id in BotConfig.deleted_by_bot:
         BotConfig.deleted_by_bot.discard(payload.message_id)
         return
 
-    # Если сообщения не было в кэше, мы не знаем его автора и текст
-    message = payload.cached_message
-    if not message:
-        # Опционально: можно отправить лог "Сообщение удалено (не найдено в кэше)"
-        return
-
-    if message.author.bot or (not message.content and not message.attachments):
-        return
-
+    # Находим глобальный канал логирования
     log_channel_id = BotConfig.CHANNELS.get('mod_logs')
-    log_channel = bot.get_channel(log_channel_id) or await bot.fetch_channel(log_channel_id)
+    log_channel = bot.get_channel(log_channel_id)
     if not log_channel:
+        try:
+            log_channel = await bot.fetch_channel(log_channel_id)
+        except Exception:
+            return
+
+    message = payload.cached_message
+
+    # === ВОТ ЭТОТ БЛОК: Если сообщения НЕТ в кэше бота ===
+    if not message:
+        # Пытаемся определить текстовый канал, где произошло удаление
+        channel_mention = f"<#{payload.channel_id}>"
+        
+        embed = discord.Embed(
+            title="<:binemoji:1525176536607752202> 𝐃𝐄𝐋𝐄𝐓𝐄𝐃 (Вне кэша)",
+            description=(
+                f"Было удалено старое сообщение, которого не оказалось в памяти бота.\n"
+                f"`ᴋᴀнᴀᴧ:` {channel_mention}\n"
+                f"`ID сообщения:` `{payload.message_id}`\n\n"
+                f"*Содержимое и автор неизвестны, так как сообщение отправлено до запуска бота или стерлось из памяти.*"
+            ),
+            color=discord.Color.dark_red(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        try:
+            await safe_send(log_channel, embed=embed)
+        except Exception as e:
+            print(f"Ошибка при отправке лога удаления вне кэша: {e}")
+        return
+    # =====================================================
+
+    # ДАЛЬШЕ ИДЕТ ВАШ СТАНДАРТНЫЙ КОД (когда сообщение НАЙДЕНО в кэше)
+    if message.author.bot or (not message.content and not message.attachments):
         return
 
     author = message.author
@@ -3007,7 +3035,10 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
             attachments_text = attachments_text[:1021] + "..."
         embed.add_field(name=f"📎 Вложения ({len(message.attachments)})", value=attachments_text, inline=False)
 
-    embed.set_footer(text=author.display_name, icon_url=user_avatar) if user_avatar else embed.set_footer(text=author.display_name)
+    if user_avatar:
+        embed.set_footer(text=author.display_name, icon_url=user_avatar)
+    else:
+        embed.set_footer(text=author.display_name)
 
     try:
         await safe_send(log_channel, embed=embed)
@@ -3021,46 +3052,6 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
     if not payload.guild_id:
         return
 
-    # Пытаемся получить старую версию сообщения из кэша бота
-    before = payload.cached_message
-    if not before:
-        # Если сообщения нет в кэше, мы не можем узнать, что именно изменилось
-        return
-
-    # Игнорируем сообщения ботов
-    if before.author.bot:
-        return
-
-    # Получаем обновленное (новое) сообщение из канала
-    try:
-        channel = bot.get_channel(payload.channel_id) or await bot.fetch_channel(payload.channel_id)
-        if not channel:
-            return
-        after = await channel.fetch_message(payload.message_id)
-    except Exception:
-        # Если сообщение не удалось получить (например, удалено или нет доступа)
-        return
-
-    # 1. Если текст и вложения не изменились (например, подгрузился превью ссылки)
-    if (
-        before.content == after.content
-        and before.attachments == after.attachments
-    ):
-        return
-
-    # 2. Проверка на незначительные правки текста
-    if before.content and after.content:
-        # Вычисляем процент схожести (от 0.0 до 1.0)
-        similarity = difflib.SequenceMatcher(
-            None, before.content, after.content
-        ).ratio()
-
-        # Порог схожести: 0.75 (75%). Если изменения незначительные — игнорируем.
-        char_difference = abs(len(before.content) - len(after.content))
-
-        if similarity >= 0.75 and char_difference <= 3:
-            return
-
     # ГЛОБАЛЬНЫЙ ПОИСК КАНАЛА (для межсерверной отправки)
     log_channel_id = BotConfig.CHANNELS.get('mod_logs')
     log_channel = bot.get_channel(log_channel_id)
@@ -3070,11 +3061,95 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
         except Exception:
             return
 
-    # Берём данные о пользователе
+    # Получаем обновленное (новое) сообщение из канала
+    try:
+        channel = bot.get_channel(payload.channel_id) or await bot.fetch_channel(payload.channel_id)
+        if not channel:
+            return
+        after = await channel.fetch_message(payload.message_id)
+    except Exception:
+        # Если сообщение не удалось получить (например, оно уже удалено)
+        return
+
+    # Игнорируем сообщения ботов
+    if after.author.bot:
+        return
+
+    before = payload.cached_message
+
+    # === БЛОК: Если старого сообщения НЕТ в кэше бота ===
+    if not before:
+        author = after.author
+        user_avatar = author.display_avatar.url if author.display_avatar else None
+
+        embed = discord.Embed(
+            title="<:pencilemoji:1525177241749950464> 𝐑𝐄𝐃𝐀𝐂𝐓𝐄𝐃 (Вне кэша)",
+            description=(
+                f"Было изменено старое сообщение, оригинальный текст которого не сохранен.\n"
+                f"`ᴀʙᴛоᴩ:` {author.mention}\n"
+                f"`ᴋᴀнᴀᴧ:` {channel.mention}\n"
+                f"[Перейти к сообщению]({after.jump_url})"
+            ),
+            color=discord.Color.dark_orange(),
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        def format_content(content):
+            if not content:
+                return "*Пусто*"
+            safe_text = content.replace("```", "`\u200b`\u200b`")
+            return safe_text[:400] + ("..." if len(safe_text) > 400 else "")
+
+        # Показываем только то, каким сообщение СТАЛО
+        embed.add_field(
+            name="`ᴄᴛᴀᴧо:`",
+            value=f"```{format_content(after.content)}```",
+            inline=False,
+        )
+
+        if after.attachments:
+            embed.add_field(
+                name="📎 Вложения",
+                value=f"Содержит {len(after.attachments)} файл(ов)",
+                inline=False
+            )
+
+        if user_avatar:
+            embed.set_footer(text=author.display_name, icon_url=user_avatar)
+        else:
+            embed.set_footer(text=author.display_name)
+
+        try:
+            await safe_send(log_channel, embed=embed)
+        except Exception as e:
+            print(f"Ошибка при отправке лога редактирования вне кэша: {e}")
+        return
+    # =====================================================
+
+    # ДАЛЬШЕ ИДЕТ ВАШ СТАНДАРТНЫЙ КОД (когда сообщение НАЙДЕНО в кэше)
+    
+    # 1. Если текст и вложения не изменились (например, подгрузился превью ссылки)
+    if (
+        before.content == after.content
+        and before.attachments == after.attachments
+    ):
+        return
+
+    # 2. Проверка на незначительные изменения текста
+    if before.content and after.content:
+        similarity = difflib.SequenceMatcher(
+            None, before.content, after.content
+        ).ratio()
+
+        char_difference = abs(len(before.content) - len(after.content))
+
+        if similarity >= 0.75 and char_difference <= 3:
+            return
+
     author = before.author
     user_avatar = author.display_avatar.url if author.display_avatar else None
 
-    # Формируем базовый Embed (оригинальное оформление сохранено)
+    # Формируем базовый Embed (оригинальное оформление)
     embed = discord.Embed(
         title="<:pencilemoji:1525177241749950464> 𝐑𝐄𝐃𝐀𝐂𝐓𝐄𝐃",
         description=(
@@ -3085,7 +3160,6 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
         timestamp=datetime.now(timezone.utc),
     )
 
-    # Функция для безопасного экранирования бэктиков в коде
     def format_content(content):
         if not content:
             return "*Пусто*"
@@ -3127,13 +3201,11 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
                 inline=False,
             )
 
-    # Установка футера
     if user_avatar:
         embed.set_footer(text=author.display_name, icon_url=user_avatar)
     else:
         embed.set_footer(text=author.display_name)
 
-    # Отправка лога
     try:
         await safe_send(log_channel, embed=embed)
     except Exception as e:
